@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "es2018",
+    "module": "commonJS",
+    "strict": true,
+    "importHelpers": true,
+    "moduleResolution": "node",
+    "sourceMap": true,
+    "types": [],
+    "lib": ["dom", "es2018"]
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules"]
+}
