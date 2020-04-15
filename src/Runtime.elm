@@ -1,8 +1,7 @@
-module App exposing (main)
+module Runtime exposing (StorytimeProgram, app)
 
 import Browser
 import Cmd.Extra exposing (pure)
-import Cyoa exposing (script, start)
 import Element exposing (..)
 import Element.Background as Background
 import Element.Border as Border
@@ -11,11 +10,13 @@ import Element.Font as Font
 import Html exposing (Html)
 import ScriptTypes as Script
 
+type alias StorytimeProgram = Program () Model Msg
 
-main : Program () Model Msg
-main =
+
+app : Script.Scene -> List Script.Scene -> StorytimeProgram
+app start script =
     Browser.element
-        { init = init
+        { init = init start script
         , view = view
         , update = update
         , subscriptions = subscriptions
@@ -34,8 +35,8 @@ type alias Model =
 
 
 
-init : () -> ( Model, Cmd Msg )
-init () =
+init : Script.Scene -> List Script.Scene -> () -> ( Model, Cmd Msg )
+init start script () =
     { script = script
     , previous = []
     , current = start

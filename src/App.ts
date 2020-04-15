@@ -1,6 +1,6 @@
-import { Elm } from './App.elm';
+import { Elm } from './Cyoa.elm';
 
-const app = Elm.App.init({
+const app = Elm.Cyoa.init({
   node: document.querySelector('main'),
   flags: localStorage.getItem('markup'),
 });
