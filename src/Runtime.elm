@@ -1,7 +1,7 @@
 module Runtime exposing (StorytimeProgram, app)
 
 import Browser
-import Cmd.Extra exposing (pure)
+import Cmd.Extra exposing (withCmd)
 import Element exposing (..)
 import Element.Background as Background
 import Element.Border as Border
@@ -41,7 +41,7 @@ init start script () =
     , previous = []
     , current = start
     }
-        |> pure
+        |> withCmd Cmd.none
 
 
 
@@ -68,11 +68,11 @@ update msg model =
                         | previous = model.previous ++ [ ( model.current.contents, option ) ]
                         , current = scene
                     }
-                        |> pure
+                        |> withCmd Cmd.none
 
                 _ ->
                     -- Error, can't (?) happen
-                    model |> pure
+                    model |> withCmd Cmd.none
 
 
 
@@ -155,5 +155,5 @@ activeButtonColor =
     rgb255 10 150 130
 
 
-inactiveButtonColor : Color 
+inactiveButtonColor : Color
 inactiveButtonColor = rgb255 100 100 100
