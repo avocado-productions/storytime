@@ -1,7 +1,6 @@
 module Convert exposing (..)
 
-import Loc
-import Parse
+import Config
 import ScriptTypes as Script
 import Types
 
@@ -21,85 +20,78 @@ nextifyPassage next { level, contents, label } =
     { level = level, contents = newContents, label = label } :: newPassages
 
 
-nextify : Maybe Types.Label -> Types.Element Types.Parsed -> ( Types.Element Types.Label, List (Types.Passage Types.Label) )
+nextify : Maybe Types.Label -> Types.ParsedElement -> ( Types.FlatElement, List Types.FlatPassage )
 nextify next elem =
     case elem of
         Types.Paragraph text ->
             ( Types.Paragraph text, [] )
 
-        Types.Preformatted config text ->
-            ( Types.Preformatted config text, [] )
+        Types.Preformatted block ->
+            ( Types.Preformatted block, [] )
 
         Types.Problem problem ->
             ( Types.Problem problem, [] )
 
-        Types.CommandMark command Types.None ->
-            ( Types.CommandMark command Types.None, [] )
+        Types.OldProblem problem ->
+            ( Types.OldProblem problem, [] )
 
-        Types.CommandMark command (Types.Options opts) ->
-            Debug.todo ""
-
-        Types.CommandMark command (Types.Continuation (Types.Reference ( _, "next" ))) ->
-            case next of
-                Nothing ->
-                    ( Types.CommandMark command (Types.Continuation (Types.Named "next")), [] )
-
-                Just ref ->
-                    ( Types.CommandMark command (Types.Continuation ref), [] )
-
-        Types.CommandMark command (Types.Continuation (Types.Reference ( _, ref ))) ->
-            ( Types.CommandMark command (Types.Continuation (Types.Named ref)), [] )
-
-        Types.CommandMark (( ( loc, _ ), _ ) as command) (Types.Continuation (Types.Elements elems)) ->
+        Types.Command block ->
             let
-                label =
-                    Types.Anonymous loc.start.line
+                ( ( cmdloc, _ ), _ ) =
+                    block.command
 
-                children =
-                    List.map (nextify next) elems
-
-                childPassage =
-                    { label = ( loc, label )
-                    , contents = List.map (\( x, _ ) -> x) children
-                    , level = 1
-                    }
-
-                childPassages =
-                    List.map (\( _, x ) -> x) children |> List.concat
+                base =
+                    { command = block.command, line = block.line, indent = block.indent, text = block.text, child = Types.None }
             in
-            ( Types.CommandMark command (Types.Continuation label), childPassage :: childPassages )
+            case block.child of
+                Types.None ->
+                    ( Types.Command { base | child = Types.None }, [] )
+
+                Types.Options opts ->
+                    ( Types.Problem { contents = block.text, indent = block.indent, line = block.line, loc = cmdloc, problem = "No support for options" }, [] )
+
+                Types.Divert (Types.Reference ( loc, "next" )) ->
+                    case next of
+                        Nothing ->
+                            ( Types.Command { base | child = Types.Divert <| Types.Named ( loc, "next" ) }, [] )
+
+                        Just ref ->
+                            ( Types.Command { base | child = Types.Divert ref }, [] )
+
+                Types.Divert (Types.Reference ref) ->
+                    ( Types.Command { base | child = Types.Divert <| Types.Named ref }, [] )
+
+                Types.Divert (Types.Immediate child) ->
+                    ( Types.Problem { contents = block.text, indent = block.indent, line = block.line, loc = cmdloc, problem = "No support for >>>" }, [] )
+
+                Types.Divert (Types.Nested child) ->
+                    ( Types.Problem { contents = block.text, indent = block.indent, line = block.line, loc = cmdloc, problem = "No support for vvv" }, [] )
 
 
-convert : String -> Script.Script
-convert source =
+convert : ( List Types.ParsedElement, List Types.ParsedPassage ) -> Script.Script
+convert ( rawPrelude, rawPassages ) =
     let
-        ( rawPrelude, rawPassages ) =
-            Parse.parse source
-
         ( firstNext, restOfPassages ) =
             List.foldr
                 (\rawPassage ( next, ps ) ->
                     let
                         newPassages =
                             nextifyPassage next rawPassage
-
-                        ( _, label ) =
-                            rawPassage.label
                     in
-                    ( Just label, newPassages :: ps )
+                    ( Just rawPassage.label, newPassages :: ps )
                 )
                 ( Nothing, [] )
                 rawPassages
 
         firstPassages =
-            nextifyPassage firstNext { level = 1, label = Loc.todoDummyLocate <| Types.Anonymous 0, contents = rawPrelude }
+            nextifyPassage firstNext { level = 1, label = Types.Anonymous 0, contents = rawPrelude }
 
         rawScript =
             List.concat <| (firstPassages :: restOfPassages)
 
         script =
             List.map
-                (\{ label, contents } -> List.foldr convertElement { key = convertLabel (Loc.value label), contents = [], options = [] } contents)
+                (\{ label, contents } -> List.foldr convertElement { key = convertLabel label, contents = [], options = [] } contents)
                 rawScript
     in
     script
@@ -115,16 +107,20 @@ convertElement elem scene =
             in
             { scene | contents = text :: scene.contents }
 
-        Types.CommandMark ( ( _, "choice" ), ( [ ( _, Types.Markup contents ) ], [] ) ) (Types.Continuation ref) ->
-            let
-                text =
-                    List.map (convertText { bold = False, italic = False, under = False, strike = False }) contents |> List.concat
+        Types.Command block ->
+            { scene | contents = scene.contents }
 
-                new =
-                    { key = convertLabel ref, text = text }
-            in
-            { scene | options = new :: scene.options }
+        {- }
+           Types.Command ( ( _, "choice" ), ( [ ( _, Types.Markup contents ) ], [] ) ) (Types.Continuation ref) ->
+               let
+                   text =
+                       List.map (convertText { bold = False, italic = False, under = False, strike = False }) contents |> List.concat
 
+                   new =
+                       { key = convertLabel ref, text = text }
+               in
+               { scene | options = new :: scene.options }
+        -}
         _ ->
             { scene | contents = [ Script.Problem ] :: scene.contents }
 
@@ -158,7 +154,7 @@ convertText style text =
 convertLabel : Types.Label -> String
 convertLabel lab =
     case lab of
-        Types.Named n ->
+        Types.Named ( _, n ) ->
             "named_" ++ n
 
         Types.Anonymous i ->

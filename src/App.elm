@@ -2,6 +2,7 @@ port module App exposing (main)
 
 import Browser
 import Cmd.Extra exposing (pure)
+import Config
 import Convert
 import Element exposing (..)
 import Element.Background as Background
@@ -11,7 +12,10 @@ import Element.Font as Font
 import Element.Input as Input
 import Html exposing (Html)
 import Json.Decode as Decode
+import Parse
 import ScriptTypes as Script
+import Types
+import View
 
 
 main : Program Decode.Value Model Msg
@@ -23,8 +27,25 @@ main =
         , subscriptions = subscriptions
         }
 
+colors = 
+    { gray1 = rgb255 248 248 248
+    , gray2 = rgb255 184 184 184
+    , gray3 = rgb255 120 120 120 
+    , gray4 = rgb255 56 56 56
+    }
 
 port contentsUpdated : String -> Cmd msg
+
+
+config : Config.ParserConfig
+config =
+    Config.createParserConfig
+        { verbatimChars = []
+        , annotationChars = []
+        , replacements = []
+        , verbatimBlocks = []
+        }
+        |> (\( _, y ) -> y)
 
 
 
@@ -33,6 +54,7 @@ port contentsUpdated : String -> Cmd msg
 
 type alias Model =
     { code : String
+    , camperdown : ( List Types.ParsedElement, List Types.ParsedPassage )
     , script : Script.Script
     , state : State
     }
@@ -64,10 +86,14 @@ It made no difference at all.
 ### road less traveled
 It made all the difference."""
 
+        camperdown =
+            Parse.parse config contents
+
         script =
-            Convert.convert contents
+            Convert.convert camperdown
     in
     { code = contents
+    , camperdown = camperdown
     , script = script
     , state = Edit
     }
@@ -81,7 +107,8 @@ It made all the difference."""
 type Msg
     = Select Script.Choice
     | Code String
-    | Swap
+    | ModeEdit
+    | ModePlay
 
 
 update : Msg -> Model -> ( Model, Cmd msg )
@@ -106,9 +133,13 @@ update msg model =
                     model |> pure
 
         ( Code code, Edit ) ->
-            ( { model | code = code, script = Convert.convert code }, contentsUpdated code )
+            let
+                camperdown =
+                    Parse.parse config code
+            in
+            ( { model | code = code, camperdown = camperdown, script = Convert.convert camperdown }, contentsUpdated code )
 
-        ( Swap, Edit ) ->
+        ( ModePlay, Edit ) ->
             case model.script of
                 [] ->
                     model |> pure
@@ -116,7 +147,7 @@ update msg model =
                 scene :: _ ->
                     { model | state = Play { previous = [], current = scene } } |> pure
 
-        ( Swap, Play _ ) ->
+        ( ModeEdit, Play _ ) ->
             { model | state = Edit } |> pure
 
         _ ->
@@ -134,40 +165,84 @@ subscriptions _ =
 
 
 -- View
+pick : Bool -> Msg -> String -> String -> Element Msg
+pick isActive msg img desc  =
+    let
+        highlight = 
+            if isActive then colors.gray1 else colors.gray4
+        extn = if isActive then "1" else "3"
+    in
+    row [ ] [
+        el [height fill, width (px 2), Background.color highlight] none
+     , image [ height (px 50), width (px 50), centerX, Events.onClick msg ] { src = img ++ "-gray" ++ extn ++ ".png", description = desc }
+      ]
+
 
 
 view : Model -> Html Msg
 view model =
     let
-        swap =
-            case model.state of
-                Play _ ->
-                    "Edit"
-
-                _ ->
-                    "Play"
-
+        isEdit = model.state == Edit
+{-}
         switch =
             el [ alignRight, padding 20, Font.bold ] <|
                 el [ Background.color (rgb255 200 230 255), padding 10, Events.onClick Swap, width (px 80) ] <|
                     el [ centerX ] <|
                         text swap
+-}
     in
-    Element.layout
-        [ height fill, width fill, Background.color bgcolor, inFront switch ]
+    layout
+        [ height fill, width fill, Background.color bgcolor ]
     <|
-        case model.state of
-            Play { previous, current } ->
-                Element.column
-                    [ width (px 700), height fill, padding 30, spacing 20, Background.color columncolor, centerX ]
-                    ((List.map viewPrevious previous |> List.concat)
-                        ++ viewCurrentScene current
-                    )
+        row
+            [ height fill, width fill ]
+            [ column [ height fill, width (px 57), paddingXY 0 5, spacing 5, Background.color colors.gray4 ] 
+                [ pick isEdit ModeEdit "edit" "Edit source code"
+                , pick (not isEdit) ModePlay "play" "Run script"
+                ]
+            , case model.state of
+                Edit ->
+                    row [ height fill, width fill ]
+                        [ Input.multiline
+                                [ width (px 500), height fill, padding 20, scrollbarY, Font.family [ Font.typeface "Operator Mono SSm", Font.typeface "Source Code Pro", Font.monospace ], Font.size 12 ]
+                                { onChange = Code, text = model.code, placeholder = Nothing, label = Input.labelHidden "Wut", spellcheck = True }
+                        , el [ height fill, width (px 2), Background.color colors.gray1 ] none
+                        , column [ height fill, width fill, padding 20, spacing 20, scrollbarY, clipX, Background.color colors.gray1 ] <|
+                            View.view model.camperdown
+                        ]
 
-            Edit ->
-                Input.multiline
-                    [ width (px 700), height fill, padding 20, Background.color columncolor, centerX, Font.family [ Font.typeface "Operator Mono SSm", Font.typeface "Source Code Pro", Font.monospace ], Font.size 12 ]
-                    { onChange = Code, text = model.code, placeholder = Nothing, label = Input.labelHidden "Wut", spellcheck = True }
+                Play { previous, current } ->
+                    Element.column
+                        [ width (px 700), height fill, padding 30, spacing 20, Background.color columncolor, centerX ]
+                        ((List.map viewPrevious previous |> List.concat)
+                            ++ viewCurrentScene current
+                        )
+            ]
+
+
+
+{- }        , el [ height fill, width (px 600), Background.color (rgb255 100 100 100)] none
+   , el [ height fill, width (px 2), Background.color (rgb255 300 300 300) ] none
+   , el [ height fill, width fill, Background.color (rgb255 100 100 100)] none ]
+-}
+{- }
+   Element.layout
+       [ height fill, width fill, Background.color bgcolor, inFront switch ]
+   <|
+       case model.state of
+           Play { previous, current } ->
+               Element.column
+                   [ width (px 700), height fill, padding 30, spacing 20, Background.color columncolor, centerX ]
+                   ((List.map viewPrevious previous |> List.concat)
+                       ++ viewCurrentScene current
+                   )
+
+           Edit ->
+               Input.multiline
+                   [ width (px 700), height fill, padding 20, Background.color columncolor, centerX, Font.family [ Font.typeface "Operator Mono SSm", Font.typeface "Source Code Pro", Font.monospace ], Font.size 12 ]
+                   { onChange = Code, text = model.code, placeholder = Nothing, label = Input.labelHidden "Wut", spellcheck = True }
+
+-}
 
 
 commonButton =
