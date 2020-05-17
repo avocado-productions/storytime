@@ -1,6 +1,8 @@
 {
   "scripts": {
-    "start": "webpack-dev-server",
+    "start": "webpack-dev-server --env",
+    "build": "webpack --env",
+    "publish": "webpack --env.production && netlify deploy --dir=dist --prod",
     "prettier": "prettier --write *.json *.js src/**/*.ts src/**/*.js"
   },
   "prettier": {
@@ -12,6 +14,7 @@
   "devDependencies": {
     "awesome-typescript-loader": "^5.2.1",
     "elm-webpack-loader": "^6.0.1",
+    "netlify-cli": "^2.48.0",
     "prettier": "^1.19.1",
     "typescript": "^3.8.3",
     "webpack": "^4.42.0",
