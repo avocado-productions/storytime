@@ -4,6 +4,7 @@ import Browser
 import Cmd.Extra exposing (pure)
 import Config
 import Convert
+import Display
 import Element exposing (..)
 import Element.Background as Background
 import Element.Border as Border
@@ -14,6 +15,7 @@ import Html exposing (Html)
 import Json.Decode as Decode
 import Parse
 import ScriptTypes as Script
+import Set
 import Types
 import View
 
@@ -27,34 +29,46 @@ main =
         , subscriptions = subscriptions
         }
 
-colors = 
+
+colors =
     { gray1 = rgb255 248 248 248
     , gray2 = rgb255 184 184 184
-    , gray3 = rgb255 120 120 120 
+    , gray3 = rgb255 120 120 120
     , gray4 = rgb255 56 56 56
     }
+
 
 port contentsUpdated : String -> Cmd msg
 
 
 config : Config.ParserConfig
 config =
-    Config.createParserConfig
-        { verbatimChars = []
-        , annotationChars = []
-        , replacements = []
-        , verbatimBlocks = []
-        }
-        |> (\( _, y ) -> y)
+    { verbatimOpts = Set.fromList []
+    , annotationOpts = []
+    , replacements = []
+    , replacementFirstChars = Set.fromList []
+    , escapable = Set.fromList [ '\\', '\'', '#', '!', '?', ':', '[', ']', '(', ')' ]
+    , meaningful = Set.fromList [ '\\', '[', ']', '\n' ]
+    , markers = [ "!", "?", "#", ":" ]
+    }
 
 
 
+{- }
+   Config.createParserConfig
+       { verbatimChars = []
+       , annotationChars = []
+       , replacements = []
+       , verbatimBlocks = []
+       }
+       |> (\( _, y ) -> y)
+-}
 -- Model
 
 
 type alias Model =
     { code : String
-    , camperdown : ( List Types.ParsedElement, List Types.ParsedPassage )
+    , camperdown : Types.ParsedDocument
     , script : Script.Script
     , state : State
     }
@@ -75,9 +89,9 @@ and be one traveler, long I stood
 and looked down one as far as I could
 to where it bent in the undergrowth.
 
-! choice [Take the first, slightly less grassy and worn.]
+! choice [Take the first, slightly less grassy and worn.] ->
   -> road more traveled
-! choice [Take the second, grassy and perhaps wanting wear.]
+! choice [Take the second, grassy and perhaps wanting wear.] ->
   -> road less traveled
 
 ### road more traveled
@@ -165,38 +179,51 @@ subscriptions _ =
 
 
 -- View
-pick : Bool -> Msg -> String -> String -> Element Msg
-pick isActive msg img desc  =
-    let
-        highlight = 
-            if isActive then colors.gray1 else colors.gray4
-        extn = if isActive then "1" else "3"
-    in
-    row [ ] [
-        el [height fill, width (px 2), Background.color highlight] none
-     , image [ height (px 50), width (px 50), centerX, Events.onClick msg ] { src = img ++ "-gray" ++ extn ++ ".png", description = desc }
-      ]
 
+
+pick : Bool -> Msg -> String -> String -> Element Msg
+pick isActive msg img desc =
+    let
+        highlight =
+            if isActive then
+                colors.gray1
+
+            else
+                colors.gray4
+
+        extn =
+            if isActive then
+                "1"
+
+            else
+                "3"
+    in
+    row []
+        [ el [ height fill, width (px 2), Background.color highlight ] none
+        , image [ height (px 50), width (px 50), centerX, Events.onClick msg ] { src = img ++ "-gray" ++ extn ++ ".png", description = desc }
+        ]
 
 
 view : Model -> Html Msg
 view model =
     let
-        isEdit = model.state == Edit
-{-}
-        switch =
-            el [ alignRight, padding 20, Font.bold ] <|
-                el [ Background.color (rgb255 200 230 255), padding 10, Events.onClick Swap, width (px 80) ] <|
-                    el [ centerX ] <|
-                        text swap
--}
+        isEdit =
+            model.state == Edit
+
+        {- }
+           switch =
+               el [ alignRight, padding 20, Font.bold ] <|
+                   el [ Background.color (rgb255 200 230 255), padding 10, Events.onClick Swap, width (px 80) ] <|
+                       el [ centerX ] <|
+                           text swap
+        -}
     in
     layout
         [ height fill, width fill, Background.color bgcolor ]
     <|
         row
             [ height fill, width fill ]
-            [ column [ height fill, width (px 57), paddingXY 0 5, spacing 5, Background.color colors.gray4 ] 
+            [ column [ height fill, width (px 57), paddingXY 0 5, spacing 5, Background.color colors.gray4 ]
                 [ pick isEdit ModeEdit "edit" "Edit source code"
                 , pick (not isEdit) ModePlay "play" "Run script"
                 ]
@@ -204,11 +231,12 @@ view model =
                 Edit ->
                     row [ height fill, width fill ]
                         [ Input.multiline
-                                [ width (px 500), height fill, padding 20, scrollbarY, Font.family [ Font.typeface "Operator Mono SSm", Font.typeface "Source Code Pro", Font.monospace ], Font.size 12 ]
-                                { onChange = Code, text = model.code, placeholder = Nothing, label = Input.labelHidden "Wut", spellcheck = True }
+                            [ width (px 500), height fill, padding 20, scrollbarY, Font.family [ Font.typeface "Operator Mono SSm", Font.typeface "Source Code Pro", Font.monospace ], Font.size 12 ]
+                            { onChange = Code, text = model.code, placeholder = Nothing, label = Input.labelHidden "Wut", spellcheck = True }
                         , el [ height fill, width (px 2), Background.color colors.gray1 ] none
                         , column [ height fill, width fill, padding 20, spacing 20, scrollbarY, clipX, Background.color colors.gray1 ] <|
-                            View.view model.camperdown
+                            View.viewElements (Display.rewrite model.camperdown.prelude)
+                                :: List.map View.viewPassage model.camperdown.sections
                         ]
 
                 Play { previous, current } ->
@@ -269,17 +297,23 @@ viewPrevious ( contents, choice ) =
 viewCurrentScene : Script.Scene -> List (Element Msg)
 viewCurrentScene current =
     List.map viewParagraph current.contents
-        ++ List.map
-            (\option ->
-                paragraph
-                    (Border.color activeButtonColor
-                        :: Font.color activeButtonColor
-                        :: Events.onClick (Select option)
-                        :: commonButton
-                    )
-                    (List.map viewText option.text)
-            )
-            current.options
+        ++ (case current.options of
+                Nothing ->
+                    []
+
+                Just options ->
+                    List.map
+                        (\option ->
+                            paragraph
+                                (Border.color activeButtonColor
+                                    :: Font.color activeButtonColor
+                                    :: Events.onClick (Select option)
+                                    :: commonButton
+                                )
+                                (List.map viewText option.text)
+                        )
+                        options
+           )
 
 
 viewParagraph : List Script.Text -> Element Msg
@@ -320,8 +354,8 @@ viewText section =
             in
             el attrs (text str)
 
-        Script.Problem ->
-            el [] (el [ height (px 10), width (px 10), Background.color (rgb255 255 180 190) ] none)
+        Script.Problem str ->
+            el [] (el [ height (px 10), width (px 10), Background.color (rgb255 255 180 190) ] (text str))
 
 
 bgcolor : Color

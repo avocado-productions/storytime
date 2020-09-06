@@ -1,27 +1,32 @@
 module Convert exposing (..)
 
 import Config
+import Loc
 import ScriptTypes as Script
+import Set
+import Tuple
 import Types
 
 
-nextifyPassage : Maybe Types.Label -> Types.Passage Types.Parsed -> List (Types.Passage Types.Label)
+nextifyPassage : Maybe Types.Label -> Types.ParsedPassage -> List Types.FlatPassage
 nextifyPassage next { level, contents, label } =
     let
-        new =
-            List.map (nextify next) contents
-
-        newContents =
-            List.map (\( x, _ ) -> x) new
-
-        newPassages =
-            List.map (\( _, x ) -> x) new |> List.concat
+        ( newContents, newPassages ) =
+            nextify next contents
     in
-    { level = level, contents = newContents, label = label } :: newPassages
+    { level = level, contents = newContents, label = label }
+        :: newPassages
 
 
-nextify : Maybe Types.Label -> Types.ParsedElement -> ( Types.FlatElement, List Types.FlatPassage )
-nextify next elem =
+nextify : Maybe Types.Label -> List Types.ParsedElement -> ( List Types.FlatElement, List Types.FlatPassage )
+nextify next elems =
+    List.map (nextifyElement next) elems
+        |> List.unzip
+        |> Tuple.mapSecond List.concat
+
+
+nextifyElement : Maybe Types.Label -> Types.ParsedElement -> ( Types.FlatElement, List Types.FlatPassage )
+nextifyElement next elem =
     case elem of
         Types.Paragraph text ->
             ( Types.Paragraph text, [] )
@@ -29,26 +34,23 @@ nextify next elem =
         Types.Preformatted block ->
             ( Types.Preformatted block, [] )
 
-        Types.Problem problem ->
-            ( Types.Problem problem, [] )
-
-        Types.OldProblem problem ->
-            ( Types.OldProblem problem, [] )
-
-        Types.Command block ->
+        Types.Item { line, indent, markLoc, children } ->
             let
-                ( ( cmdloc, _ ), _ ) =
-                    block.command
-
-                base =
-                    { command = block.command, line = block.line, indent = block.indent, text = block.text, child = Types.None }
+                ( newChildren, passages ) =
+                    nextify next children
             in
-            case block.child of
+            ( Types.Item { line = line, indent = indent, markLoc = markLoc, children = newChildren }
+            , passages
+            )
+
+        Types.Command { mark, command, child, line, indent } ->
+            let
+                base =
+                    { command = command, line = line, indent = indent, mark = mark, child = Types.None }
+            in
+            case child of
                 Types.None ->
                     ( Types.Command { base | child = Types.None }, [] )
-
-                Types.Options opts ->
-                    ( Types.Problem { contents = block.text, indent = block.indent, line = block.line, loc = cmdloc, problem = "No support for options" }, [] )
 
                 Types.Divert (Types.Reference ( loc, "next" )) ->
                     case next of
@@ -61,68 +63,233 @@ nextify next elem =
                 Types.Divert (Types.Reference ref) ->
                     ( Types.Command { base | child = Types.Divert <| Types.Named ref }, [] )
 
-                Types.Divert (Types.Immediate child) ->
-                    ( Types.Problem { contents = block.text, indent = block.indent, line = block.line, loc = cmdloc, problem = "No support for >>>" }, [] )
-
-                Types.Divert (Types.Nested child) ->
-                    ( Types.Problem { contents = block.text, indent = block.indent, line = block.line, loc = cmdloc, problem = "No support for vvv" }, [] )
-
-
-convert : ( List Types.ParsedElement, List Types.ParsedPassage ) -> Script.Script
-convert ( rawPrelude, rawPassages ) =
-    let
-        ( firstNext, restOfPassages ) =
-            List.foldr
-                (\rawPassage ( next, ps ) ->
+                Types.Divert (Types.Immediate children) ->
                     let
-                        newPassages =
-                            nextifyPassage next rawPassage
+                        ( newChildren, newPassages ) =
+                            nextify next children
+
+                        label =
+                            Types.Anonymous (Loc.location mark).start.line
                     in
-                    ( Just rawPassage.label, newPassages :: ps )
+                    ( Types.Command { base | child = Types.Divert label }
+                    , { level = 1
+                      , contents = newChildren
+                      , label = label
+                      }
+                        :: newPassages
+                    )
+
+                Types.Divert (Types.Nested children) ->
+                    let
+                        ( newChildren, newPassages ) =
+                            nextify next children
+
+                        label =
+                            Types.Anonymous (Loc.location mark).start.line
+                    in
+                    ( Types.Command { base | child = Types.Divert label }
+                    , { level = 1
+                      , contents = newChildren
+                      , label = label
+                      }
+                        :: newPassages
+                    )
+
+        Types.Problem problem ->
+            ( Types.Problem problem, [] )
+
+
+convert : Types.ParsedDocument -> Script.Script
+convert { prelude, sections } =
+    let
+        ( firstNext, restRawScenes ) =
+            List.foldr
+                (\section ( next, accum ) ->
+                    ( Just section.label, nextifyPassage next section ++ accum )
                 )
                 ( Nothing, [] )
-                rawPassages
+                sections
 
-        firstPassages =
-            nextifyPassage firstNext { level = 1, label = Types.Anonymous 0, contents = rawPrelude }
+        firstLabel =
+            Types.Anonymous 0
 
-        rawScript =
-            List.concat <| (firstPassages :: restOfPassages)
+        firstRawScene =
+            nextifyPassage firstNext { level = 1, label = firstLabel, contents = prelude }
 
-        script =
-            List.map
-                (\{ label, contents } -> List.foldr convertElement { key = convertLabel label, contents = [], options = [] } contents)
-                rawScript
+        firstKey =
+            convertLabel firstLabel
     in
-    script
+    case scriptDFS (firstRawScene ++ restRawScenes) (Set.fromList [ firstKey ]) [ firstKey ] [] of
+        Err msg ->
+            [ { key = "", contents = [ [ Script.Problem msg ] ], options = Nothing, continuation = Nothing } ]
+
+        Ok script ->
+            script
 
 
-convertElement : Types.Element Types.Label -> Script.Scene -> Script.Scene
-convertElement elem scene =
-    case elem of
-        Types.Paragraph contents ->
+scriptDFS script known frontier accum =
+    case frontier of
+        [] ->
+            Ok (List.reverse accum)
+
+        key :: rest ->
+            scriptDFSStep script known rest key accum
+
+
+scriptDFSStep script known frontier key accum =
+    case lookup key script of
+        Err msg ->
+            Err msg
+
+        Ok rawScene ->
             let
-                text =
-                    List.map (convertText { bold = False, italic = False, under = False, strike = False }) contents |> List.concat
+                ( scene, options ) =
+                    convertElements script rawScene.contents []
+
+                neighbors =
+                    optionsToNeighbors options
+                        |> List.filter
+                            (\neighbor -> not (Set.member neighbor known))
+
+                newKnown =
+                    List.foldr
+                        (\neighbor set -> Set.insert neighbor set)
+                        known
+                        neighbors
             in
-            { scene | contents = text :: scene.contents }
+            scriptDFS script newKnown (neighbors ++ frontier) <|
+                ({ key = key
+                 , contents = scene
+                 , options = Maybe.map Tuple.first options
+                 , continuation = options |> Maybe.andThen Tuple.second |> Maybe.map convertLabel
+                 }
+                    :: accum
+                )
 
-        Types.Command block ->
-            { scene | contents = scene.contents }
 
-        {- }
-           Types.Command ( ( _, "choice" ), ( [ ( _, Types.Markup contents ) ], [] ) ) (Types.Continuation ref) ->
-               let
-                   text =
-                       List.map (convertText { bold = False, italic = False, under = False, strike = False }) contents |> List.concat
+optionsToNeighbors : Maybe ( List Script.Choice, Maybe Types.Label ) -> List Script.Key
+optionsToNeighbors options =
+    case options of
+        Nothing ->
+            []
 
-                   new =
-                       { key = convertLabel ref, text = text }
-               in
-               { scene | options = new :: scene.options }
-        -}
+        Just ( choices, Nothing ) ->
+            List.map .key choices
+
+        Just ( choices, Just label ) ->
+            List.map .key choices ++ [ convertLabel label ]
+
+
+convertElements : List Types.FlatPassage -> List Types.FlatElement -> List (List Script.Text) -> ( List (List Script.Text), Maybe ( List Script.Choice, Maybe Types.Label ) )
+convertElements script elems accum =
+    case elems of
+        [] ->
+            ( List.reverse accum, Nothing )
+
+        (Types.Paragraph markup) :: rest ->
+            convertElements script rest (convertMarkup plain markup :: accum)
+
+        [ Types.Command { mark, command, child } ] ->
+            if Loc.value mark /= Types.Bang then
+                ( List.reverse ([ Script.Problem "Only `!choices` or `!continue` commands allowed in text." ] :: accum), Nothing )
+
+            else
+                case ( command, child ) of
+                    ( ( Just ( _, "continue" ), ( [], [] ) ), Types.Divert label ) ->
+                        ( List.reverse accum, Just ( [ { key = convertLabel label, text = [ Script.Styled plain "..." ] } ], Nothing ) )
+
+                    ( ( Just ( _, "choices" ), ( [], [] ) ), Types.Divert label ) ->
+                        case convertChoices script label of
+                            Err str ->
+                                ( List.reverse ([ Script.Problem str ] :: accum), Nothing )
+
+                            Ok choices ->
+                                ( List.reverse accum, Just choices )
+
+                    _ ->
+                        ( List.reverse ([ Script.Problem "Unexpected or ill-formed command" ] :: accum), Nothing )
+
+        _ :: rest ->
+            convertElements script rest ([ Script.Problem "Everything except for the last thing in a section must just be a paragraph" ] :: accum)
+
+
+convertChoices : List Types.FlatPassage -> Types.Label -> Result String ( List Script.Choice, Maybe Types.Label )
+convertChoices script label =
+    lookup label script
+        |> Result.andThen (\{ contents } -> convertChoicesImpl script contents ( [], Nothing ))
+
+
+convertChoicesImpl : List Types.FlatPassage -> List Types.FlatElement -> ( List Script.Choice, Maybe Types.Label ) -> Result String ( List Script.Choice, Maybe Types.Label )
+convertChoicesImpl script options ( accumChoices, accumCont ) =
+    case options of
+        [] ->
+            Ok ( List.reverse accumChoices, accumCont )
+
+        (Types.Command { mark, command, child }) :: rest ->
+            if Loc.value mark /= Types.Huh then
+                Err "Children of a `!choices` command must all be options `?`"
+
+            else
+                case ( command, child ) of
+                    ( ( Nothing, ( [ ( _, Types.Markup markup ) ], [] ) ), Types.Divert label ) ->
+                        convertChoicesImpl script rest <|
+                            ( { key = convertLabel label, text = convertMarkup plain markup } :: accumChoices, accumCont )
+
+                    ( ( Just ( _, "continue" ), ( [], [] ) ), Types.Divert label ) ->
+                        case accumCont of
+                            Nothing ->
+                                convertChoicesImpl script rest <|
+                                    ( accumChoices, Just label )
+
+                            _ ->
+                                Err "Multiple continues inside of a `!choices` command."
+
+                    _ ->
+                        Err "Unexpeced subcommand inside a `!choices` command."
+
+        (Types.Problem { problem }) :: _ ->
+            Err problem
+
         _ ->
-            { scene | contents = [ Script.Problem ] :: scene.contents }
+            Err "Unexpected element inside a `!choices` command."
+
+
+plain : Script.Style
+plain =
+    { bold = False, italic = False, under = False, strike = False }
+
+
+lookup : Types.Label -> List Types.FlatPassage -> Result String Types.FlatPassage
+lookup label sections =
+    case sections of
+        [] ->
+            case label of
+                Types.Named ( loc, string ) ->
+                    Err <| "No luck finding section " ++ string ++ " referenced on line " ++ String.fromInt loc.start.line
+
+                Types.Anonymous n ->
+                    Err <| "Lookup error for section on line " ++ String.fromInt n
+
+        section :: rest ->
+            if label == section.label then
+                Ok section
+
+            else
+                lookup label rest
+
+
+lookupKey : Script.Key -> List Types.FlatPassage -> Result String Types.FlatPassage
+lookupKey key sections =
+    case sections of
+        [] ->
+            Err <| "No luck finding " ++ key
+
+        section :: rest ->
+            if key == convertLabel section.label then
+                Ok section
+
+            else
+                lookupKey key rest
 
 
 convertText : Script.Style -> Types.Text -> List Script.Text
@@ -131,31 +298,35 @@ convertText style text =
         Types.Raw str ->
             [ Script.Styled style str ]
 
-        Types.Annotation contents (Just ( ( _, "*" ), ( [], [] ) )) ->
-            List.map (convertText { style | bold = not style.bold }) contents
-                |> List.concat
+        Types.Annotation ( _, "*" ) contents _ Nothing ->
+            convertMarkup { style | bold = not style.bold } contents
 
-        Types.Annotation contents (Just ( ( _, "~" ), ( [], [] ) )) ->
-            List.map (convertText { style | strike = not style.strike }) contents
-                |> List.concat
+        Types.Annotation ( _, "**" ) contents _ Nothing ->
+            convertMarkup { style | bold = not style.bold } contents
 
-        Types.Annotation contents (Just ( ( _, "/" ), ( [], [] ) )) ->
-            List.map (convertText { style | italic = not style.italic }) contents
-                |> List.concat
+        Types.Annotation ( _, "_" ) contents _ Nothing ->
+            convertMarkup { style | italic = not style.italic } contents
 
-        Types.Annotation contents (Just ( ( _, "_" ), ( [], [] ) )) ->
-            List.map (convertText { style | under = not style.under }) contents
-                |> List.concat
+        Types.Annotation ( _, "__" ) contents _ Nothing ->
+            convertMarkup { style | bold = not style.bold } contents
+
+        Types.Annotation ( _, "~" ) contents _ Nothing ->
+            convertMarkup { style | strike = not style.strike } contents
 
         _ ->
-            [ Script.Problem ]
+            [ Script.Problem "Unexpected annotation" ]
+
+
+convertMarkup : Script.Style -> List Types.Text -> List Script.Text
+convertMarkup style markup =
+    List.map (convertText style) markup |> List.concat
 
 
 convertLabel : Types.Label -> String
-convertLabel lab =
-    case lab of
-        Types.Named ( _, n ) ->
-            "named_" ++ n
+convertLabel label =
+    case label of
+        Types.Anonymous n ->
+            "anon_" ++ String.fromInt n
 
-        Types.Anonymous i ->
-            "line_" ++ String.fromInt i
+        Types.Named ( loc, str ) ->
+            "named_" ++ String.fromInt loc.start.line ++ "_" ++ str

@@ -1,4 +1,4 @@
-module ScriptTypes exposing (Choice, Scene, Script, Style, Text(..))
+module ScriptTypes exposing (Choice, Key, Scene, Script, Style, Text(..))
 
 
 type alias Style =
@@ -11,11 +11,15 @@ type alias Style =
 
 type Text
     = Styled Style String
-    | Problem
+    | Problem String
+
+
+type alias Key =
+    String
 
 
 type alias Choice =
-    { key : String
+    { key : Key
     , text : List Text
     }
 
@@ -23,7 +27,8 @@ type alias Choice =
 type alias Scene =
     { key : String
     , contents : List (List Text)
-    , options : List Choice
+    , options : Maybe (List Choice)
+    , continuation : Maybe Key
     }
 
 

@@ -5,6 +5,6 @@ const app = Elm.App.init({
   flags: { contents: localStorage.getItem('markup') },
 });
 
-app.ports.contentsUpdated.subscribe(function(contents: string) {
+app.ports.contentsUpdated.subscribe(function (contents: string) {
   localStorage.setItem('markup', contents);
 });
