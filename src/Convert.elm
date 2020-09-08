@@ -3,7 +3,7 @@ module Convert exposing (..)
 import Config
 import Loc
 import ScriptTypes as Script
-import Set
+import Set exposing (Set)
 import Tuple
 import Types
 
@@ -127,44 +127,41 @@ convert { prelude, sections } =
             script
 
 
+scriptDFS : List Types.FlatPassage -> Set String -> List String -> List Script.Scene -> Result String (List Script.Scene)
 scriptDFS script known frontier accum =
     case frontier of
         [] ->
             Ok (List.reverse accum)
 
         key :: rest ->
-            scriptDFSStep script known rest key accum
+            case lookupKey key script of
+                Err msg ->
+                    Err msg
 
+                Ok rawScene ->
+                    let
+                        ( scene, options ) =
+                            convertElements script rawScene.contents []
 
-scriptDFSStep script known frontier key accum =
-    case lookup key script of
-        Err msg ->
-            Err msg
+                        neighbors =
+                            optionsToNeighbors options
+                                |> List.filter
+                                    (\neighbor -> not (Set.member neighbor known))
 
-        Ok rawScene ->
-            let
-                ( scene, options ) =
-                    convertElements script rawScene.contents []
-
-                neighbors =
-                    optionsToNeighbors options
-                        |> List.filter
-                            (\neighbor -> not (Set.member neighbor known))
-
-                newKnown =
-                    List.foldr
-                        (\neighbor set -> Set.insert neighbor set)
-                        known
-                        neighbors
-            in
-            scriptDFS script newKnown (neighbors ++ frontier) <|
-                ({ key = key
-                 , contents = scene
-                 , options = Maybe.map Tuple.first options
-                 , continuation = options |> Maybe.andThen Tuple.second |> Maybe.map convertLabel
-                 }
-                    :: accum
-                )
+                        newKnown =
+                            List.foldr
+                                (\neighbor set -> Set.insert neighbor set)
+                                known
+                                neighbors
+                    in
+                    scriptDFS script newKnown (neighbors ++ rest) <|
+                        ({ key = key
+                         , contents = scene
+                         , options = Maybe.map Tuple.first options
+                         , continuation = options |> Maybe.andThen Tuple.second |> Maybe.map convertLabel
+                         }
+                            :: accum
+                        )
 
 
 optionsToNeighbors : Maybe ( List Script.Choice, Maybe Types.Label ) -> List Script.Key
@@ -329,4 +326,4 @@ convertLabel label =
             "anon_" ++ String.fromInt n
 
         Types.Named ( loc, str ) ->
-            "named_" ++ String.fromInt loc.start.line ++ "_" ++ str
+            "named_" ++ str

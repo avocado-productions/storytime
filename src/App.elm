@@ -14,7 +14,7 @@ import Element.Input as Input
 import Html exposing (Html)
 import Json.Decode as Decode
 import Parse
-import ScriptTypes as Script
+import ScriptTypes as Script exposing (Key)
 import Set
 import Types
 import View
@@ -75,7 +75,11 @@ type alias Model =
 
 
 type State
-    = Play { previous : List ( List (List Script.Text), Script.Choice ), current : Script.Scene }
+    = Play
+        { previous : List ( List (List Script.Text), Script.Choice )
+        , current : Script.Scene
+        , callstack : List Script.Key
+        }
     | Edit
 
 
@@ -89,9 +93,10 @@ and be one traveler, long I stood
 and looked down one as far as I could
 to where it bent in the undergrowth.
 
-! choice [Take the first, slightly less grassy and worn.] ->
+! choices vv
+? [Take the first, slightly less grassy and worn.]
   -> road more traveled
-! choice [Take the second, grassy and perhaps wanting wear.] ->
+? [Take the second, grassy and perhaps wanting wear.]
   -> road less traveled
 
 ### road more traveled
@@ -125,6 +130,33 @@ type Msg
     | ModePlay
 
 
+plain =
+    { bold = False, italic = False, strike = False, under = False }
+
+
+loadScene scene state =
+    case ( scene.options, scene.continuation, state.callstack ) of
+        ( Nothing, _, [] ) ->
+            { state
+                | current = { scene | contents = scene.contents ++ [ [ Script.Styled plain "Fin." ] ] }
+            }
+
+        ( Nothing, _, key :: rest ) ->
+            { state
+                | current = { scene | options = Just [ { key = key, text = [ Script.Styled plain "..." ] } ] }
+                , callstack = rest
+            }
+
+        ( _, Just key, _ ) ->
+            { state
+                | current = scene
+                , callstack = key :: state.callstack
+            }
+
+        _ ->
+            { state | current = scene }
+
+
 update : Msg -> Model -> ( Model, Cmd msg )
 update msg model =
     case ( msg, model.state ) of
@@ -140,9 +172,22 @@ update msg model =
             in
             case nextScene of
                 Just scene ->
-                    { model | state = Play { previous = nextPrevious, current = scene } } |> pure
+                    let
+                        nextState =
+                            loadScene scene state
+                    in
+                    { model | state = Play { nextState | previous = nextPrevious } }
+                        |> pure
 
-                _ ->
+                {-
+                   { model | state = Play { previous = nextPrevious
+                       , current = scene
+                       , callstack =
+                           case scene.continuation of
+                               Nothing -> state.callstack
+                               Just key -> key :: state.callstack } } |> pure
+                -}
+                Nothing ->
                     -- Error, can't (?) happen
                     model |> pure
 
@@ -159,7 +204,11 @@ update msg model =
                     model |> pure
 
                 scene :: _ ->
-                    { model | state = Play { previous = [], current = scene } } |> pure
+                    let
+                        state =
+                            { previous = [], current = scene, callstack = [] }
+                    in
+                    { model | state = Play <| loadScene scene state } |> pure
 
         ( ModeEdit, Play _ ) ->
             { model | state = Edit } |> pure
