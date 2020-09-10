@@ -158,13 +158,13 @@ scriptDFS script known frontier accum =
                         ({ key = key
                          , contents = scene
                          , options = Maybe.map Tuple.first options
-                         , continuation = options |> Maybe.andThen Tuple.second |> Maybe.map convertLabel
+                         , continuation = options |> Maybe.andThen Tuple.second
                          }
                             :: accum
                         )
 
 
-optionsToNeighbors : Maybe ( List Script.Choice, Maybe Types.Label ) -> List Script.Key
+optionsToNeighbors : Maybe ( List Script.Choice, Maybe Script.Choice ) -> List Script.Key
 optionsToNeighbors options =
     case options of
         Nothing ->
@@ -173,11 +173,47 @@ optionsToNeighbors options =
         Just ( choices, Nothing ) ->
             List.map .key choices
 
-        Just ( choices, Just label ) ->
-            List.map .key choices ++ [ convertLabel label ]
+        Just ( choices, Just cont ) ->
+            List.map .key (cont :: choices)
 
 
-convertElements : List Types.FlatPassage -> List Types.FlatElement -> List (List Script.Text) -> ( List (List Script.Text), Maybe ( List Script.Choice, Maybe Types.Label ) )
+convertChoice args parameters label =
+    (case args of
+        [] ->
+            Ok <| ( [ Script.Styled plain "…" ], True )
+
+        [ ( _, Types.Markup markup ) ] ->
+            Ok <| ( convertMarkup plain markup, False )
+
+        _ ->
+            Err "Choices can only have at most one parameter, markup text describing the label."
+    )
+        |> Result.andThen
+            (\( text, vanishing ) ->
+                List.foldr
+                    (\parameter ->
+                        Result.andThen
+                            (\choice ->
+                                case parameter of
+                                    ( _, ( ( _, "break" ), [] ) ) ->
+                                        Ok { choice | break = True }
+
+                                    ( _, ( ( _, "vanishing" ), [ ( _, Types.Variable "true" ) ] ) ) ->
+                                        Ok { choice | vanishing = True }
+
+                                    ( _, ( ( _, "vanishing" ), [ ( _, Types.Variable "false" ) ] ) ) ->
+                                        Ok { choice | vanishing = False }
+
+                                    ( _, ( ( _, param ), _ ) ) ->
+                                        Err <| "Unexpected or ill-formed parameter " ++ param
+                            )
+                    )
+                    (Ok { key = convertLabel label, text = text, vanishing = vanishing, break = False })
+                    parameters
+            )
+
+
+convertElements : List Types.FlatPassage -> List Types.FlatElement -> List (List Script.Text) -> ( List (List Script.Text), Maybe ( List Script.Choice, Maybe Script.Choice ) )
 convertElements script elems accum =
     case elems of
         [] ->
@@ -192,8 +228,13 @@ convertElements script elems accum =
 
             else
                 case ( command, child ) of
-                    ( ( Just ( _, "continue" ), ( [], [] ) ), Types.Divert label ) ->
-                        ( List.reverse accum, Just ( [ { key = convertLabel label, text = [ Script.Styled plain "..." ] } ], Nothing ) )
+                    ( ( Just ( _, "continue" ), ( args, parameters ) ), Types.Divert label ) ->
+                        case convertChoice args parameters label of
+                            Ok choice ->
+                                ( List.reverse accum, Just ( [ choice ], Nothing ) )
+
+                            Err str ->
+                                ( List.reverse ([ Script.Problem str ] :: accum), Nothing )
 
                     ( ( Just ( _, "choices" ), ( [], [] ) ), Types.Divert label ) ->
                         case convertChoices script label of
@@ -210,13 +251,13 @@ convertElements script elems accum =
             convertElements script rest ([ Script.Problem "Everything except for the last thing in a section must just be a paragraph" ] :: accum)
 
 
-convertChoices : List Types.FlatPassage -> Types.Label -> Result String ( List Script.Choice, Maybe Types.Label )
+convertChoices : List Types.FlatPassage -> Types.Label -> Result String ( List Script.Choice, Maybe Script.Choice )
 convertChoices script label =
     lookup label script
         |> Result.andThen (\{ contents } -> convertChoicesImpl script contents ( [], Nothing ))
 
 
-convertChoicesImpl : List Types.FlatPassage -> List Types.FlatElement -> ( List Script.Choice, Maybe Types.Label ) -> Result String ( List Script.Choice, Maybe Types.Label )
+convertChoicesImpl : List Types.FlatPassage -> List Types.FlatElement -> ( List Script.Choice, Maybe Script.Choice ) -> Result String ( List Script.Choice, Maybe Script.Choice )
 convertChoicesImpl script options ( accumChoices, accumCont ) =
     case options of
         [] ->
@@ -228,18 +269,26 @@ convertChoicesImpl script options ( accumChoices, accumCont ) =
 
             else
                 case ( command, child ) of
-                    ( ( Nothing, ( [ ( _, Types.Markup markup ) ], [] ) ), Types.Divert label ) ->
-                        convertChoicesImpl script rest <|
-                            ( { key = convertLabel label, text = convertMarkup plain markup } :: accumChoices, accumCont )
+                    ( ( Nothing, ( args, parameters ) ), Types.Divert label ) ->
+                        convertChoice args parameters label
+                            |> Result.andThen
+                                (\choice ->
+                                    convertChoicesImpl script rest <|
+                                        ( choice :: accumChoices, accumCont )
+                                )
 
-                    ( ( Just ( _, "continue" ), ( [], [] ) ), Types.Divert label ) ->
-                        case accumCont of
-                            Nothing ->
-                                convertChoicesImpl script rest <|
-                                    ( accumChoices, Just label )
+                    ( ( Just ( _, "continue" ), ( args, parameters ) ), Types.Divert label ) ->
+                        convertChoice args parameters label
+                            |> Result.andThen
+                                (\choice ->
+                                    case accumCont of
+                                        Nothing ->
+                                            convertChoicesImpl script rest <|
+                                                ( accumChoices, Just choice )
 
-                            _ ->
-                                Err "Multiple continues inside of a `!choices` command."
+                                        _ ->
+                                            Err "Multiple continues inside of a `!choices` command."
+                                )
 
                     _ ->
                         Err "Unexpeced subcommand inside a `!choices` command."
@@ -309,6 +358,11 @@ convertText style text =
 
         Types.Annotation ( _, "~" ) contents _ Nothing ->
             convertMarkup { style | strike = not style.strike } contents
+
+        Types.Annotation ( _, "\"" ) contents _ Nothing ->
+            Script.Styled style "“"
+                :: convertMarkup style contents
+                ++ [ Script.Styled style "”" ]
 
         _ ->
             [ Script.Problem "Unexpected annotation" ]

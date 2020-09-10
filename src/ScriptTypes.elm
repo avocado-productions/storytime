@@ -21,6 +21,8 @@ type alias Key =
 type alias Choice =
     { key : Key
     , text : List Text
+    , vanishing : Bool
+    , break : Bool
     }
 
 
@@ -28,7 +30,7 @@ type alias Scene =
     { key : String
     , contents : List (List Text)
     , options : Maybe (List Choice)
-    , continuation : Maybe Key
+    , continuation : Maybe Choice
     }
 
 

@@ -13,6 +13,7 @@ import Element.Font as Font
 import Element.Input as Input
 import Html exposing (Html)
 import Json.Decode as Decode
+import Occurs exposing (Occurs(..))
 import Parse
 import ScriptTypes as Script exposing (Key)
 import Set
@@ -44,11 +45,20 @@ port contentsUpdated : String -> Cmd msg
 config : Config.ParserConfig
 config =
     { verbatimOpts = Set.fromList []
-    , annotationOpts = []
-    , replacements = []
-    , replacementFirstChars = Set.fromList []
-    , escapable = Set.fromList [ '\\', '\'', '#', '!', '?', ':', '[', ']', '(', ')' ]
-    , meaningful = Set.fromList [ '\\', '[', ']', '\n' ]
+    , annotationOpts =
+        [ { startSymbol = "**", endSymbol = "**", commandOccursAfterwards = Never }
+        , { startSymbol = "*", endSymbol = "*", commandOccursAfterwards = Never }
+        , { startSymbol = "__", endSymbol = "__", commandOccursAfterwards = Never }
+        , { startSymbol = "_", endSymbol = "_", commandOccursAfterwards = Never }
+        , { startSymbol = "~", endSymbol = "~", commandOccursAfterwards = Never }
+        , { startSymbol = "~", endSymbol = "~", commandOccursAfterwards = Never }
+        , { startSymbol = "\"", endSymbol = "\"", commandOccursAfterwards = Never }
+        , { startSymbol = "[", endSymbol = "]", commandOccursAfterwards = Always }
+        ]
+    , replacements = [ ( "...", "…" ), ( "---", "—" ), ( "--", "–" ) ]
+    , replacementFirstChars = Set.fromList [ '.', '-' ]
+    , escapable = Set.fromList [ '\\', '\'', '#', '!', '?', ':', '[', ']', '(', ')', '*', '_', '~', '"', '.', '-' ]
+    , meaningful = Set.fromList [ '\\', '[', ']', '\n', '*', '_', '~', '"', '.', '-' ]
     , markers = [ "!", "?", "#", ":" ]
     }
 
@@ -76,9 +86,9 @@ type alias Model =
 
 type State
     = Play
-        { previous : List ( List (List Script.Text), Script.Choice )
+        { previous : List ( List (List Script.Text), Maybe Script.Choice )
         , current : Script.Scene
-        , callstack : List Script.Key
+        , callstack : List Script.Choice
         }
     | Edit
 
@@ -135,26 +145,27 @@ plain =
 
 
 loadScene scene state =
-    case ( scene.options, scene.continuation, state.callstack ) of
-        ( Nothing, _, [] ) ->
-            { state
-                | current = { scene | contents = scene.contents ++ [ [ Script.Styled plain "Fin." ] ] }
-            }
+    case scene.options of
+        Nothing ->
+            case state.callstack of
+                [] ->
+                    { state
+                        | current = { scene | contents = scene.contents ++ [ [ Script.Styled plain "Fin." ] ] }
+                    }
 
-        ( Nothing, _, key :: rest ) ->
-            { state
-                | current = { scene | options = Just [ { key = key, text = [ Script.Styled plain "..." ] } ] }
-                , callstack = rest
-            }
+                choice :: rest ->
+                    { state
+                        | current = { scene | options = Just [ choice ] }
+                        , callstack = rest
+                    }
 
-        ( _, Just key, _ ) ->
-            { state
-                | current = scene
-                , callstack = key :: state.callstack
-            }
+        Just _ ->
+            case scene.continuation of
+                Nothing ->
+                    { state | current = scene }
 
-        _ ->
-            { state | current = scene }
+                Just return ->
+                    { state | current = scene, callstack = return :: state.callstack }
 
 
 update : Msg -> Model -> ( Model, Cmd msg )
@@ -168,25 +179,28 @@ update msg model =
                         |> List.head
 
                 nextPrevious =
-                    state.previous ++ [ ( state.current.contents, option ) ]
+                    if option.vanishing then
+                        state.previous ++ [ ( state.current.contents, Nothing ) ]
+
+                    else
+                        state.previous ++ [ ( state.current.contents, Just option ) ]
             in
             case nextScene of
                 Just scene ->
                     let
+                        callstack =
+                            if option.break then
+                                []
+
+                            else
+                                state.callstack
+
                         nextState =
-                            loadScene scene state
+                            loadScene scene { state | callstack = callstack }
                     in
                     { model | state = Play { nextState | previous = nextPrevious } }
                         |> pure
 
-                {-
-                   { model | state = Play { previous = nextPrevious
-                       , current = scene
-                       , callstack =
-                           case scene.continuation of
-                               Nothing -> state.callstack
-                               Just key -> key :: state.callstack } } |> pure
-                -}
                 Nothing ->
                     -- Error, can't (?) happen
                     model |> pure
@@ -330,17 +344,19 @@ commonButton =
     ]
 
 
-viewPrevious : ( List (List Script.Text), Script.Choice ) -> List (Element Msg)
-viewPrevious ( contents, choice ) =
+viewPrevious : ( List (List Script.Text), Maybe Script.Choice ) -> List (Element Msg)
+viewPrevious ( contents, selected ) =
     List.map viewParagraph contents
-        ++ [ paragraph
+        ++ case selected of 
+            Nothing -> []
+            Just choice -> [ paragraph
                 (Border.color inactiveButtonColor
                     :: Background.color bgcolor
                     :: Font.color inactiveButtonColor
                     :: commonButton
                 )
                 (List.map viewText choice.text)
-           ]
+             ]
 
 
 viewCurrentScene : Script.Scene -> List (Element Msg)
