@@ -212,7 +212,7 @@ update msg model =
             in
             ( { model | code = code, camperdown = camperdown, script = Convert.convert camperdown }, contentsUpdated code )
 
-        ( ModePlay, Edit ) ->
+        ( ModePlay, _ ) ->
             case model.script of
                 [] ->
                     model |> pure
@@ -280,6 +280,12 @@ view model =
                        el [ centerX ] <|
                            text swap
         -}
+        ( playIcon, playAlt ) =
+            if isEdit then
+                ( "play", "Run script" )
+
+            else
+                ( "restart", "Start script over" )
     in
     layout
         [ height fill, width fill, Background.color bgcolor ]
@@ -288,7 +294,7 @@ view model =
             [ height fill, width fill ]
             [ column [ height fill, width (px 57), paddingXY 0 5, spacing 5, Background.color colors.gray4 ]
                 [ pick isEdit ModeEdit "edit" "Edit source code"
-                , pick (not isEdit) ModePlay "play" "Run script"
+                , pick (not isEdit) ModePlay playIcon "Run script"
                 ]
             , case model.state of
                 Edit ->
@@ -347,16 +353,20 @@ commonButton =
 viewPrevious : ( List (List Script.Text), Maybe Script.Choice ) -> List (Element Msg)
 viewPrevious ( contents, selected ) =
     List.map viewParagraph contents
-        ++ case selected of 
-            Nothing -> []
-            Just choice -> [ paragraph
-                (Border.color inactiveButtonColor
-                    :: Background.color bgcolor
-                    :: Font.color inactiveButtonColor
-                    :: commonButton
-                )
-                (List.map viewText choice.text)
-             ]
+        ++ (case selected of
+                Nothing ->
+                    []
+
+                Just choice ->
+                    [ paragraph
+                        (Border.color inactiveButtonColor
+                            :: Background.color bgcolor
+                            :: Font.color inactiveButtonColor
+                            :: commonButton
+                        )
+                        (List.map viewText choice.text)
+                    ]
+           )
 
 
 viewCurrentScene : Script.Scene -> List (Element Msg)
