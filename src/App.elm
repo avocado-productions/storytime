@@ -16,7 +16,7 @@ import Json.Decode as Decode
 import Occurs exposing (Occurs(..))
 import Parse
 import ScriptTypes as Script exposing (Key)
-import Set
+import Set exposing (Set)
 import Types
 import View
 
@@ -85,12 +85,16 @@ type alias Model =
 
 
 type State
-    = Play
-        { previous : List ( List (List Script.Text), Maybe Script.Choice )
-        , current : Script.Scene
-        , callstack : List Script.Choice
-        }
+    = Play ScriptState
     | Edit
+
+
+type alias ScriptState =
+    { previous : List ( List (List Script.Text), Maybe Script.Choice )
+    , current : ( List (List Script.Text), List Script.Choice )
+    , callstack : List Script.Choice
+    , setVars : Set String
+    }
 
 
 init : Decode.Value -> ( Model, Cmd Msg )
@@ -109,10 +113,10 @@ to where it bent in the undergrowth.
 ? [Take the second, grassy and perhaps wanting wear.]
   -> road less traveled
 
-### road more traveled
+## road more traveled
 It made no difference at all.
 
-### road less traveled
+## road less traveled
 It made all the difference."""
 
         camperdown =
@@ -144,28 +148,157 @@ plain =
     { bold = False, italic = False, strike = False, under = False }
 
 
-loadScene scene state =
-    case scene.options of
-        Nothing ->
+testPredicate state ( bool, var ) =
+    bool == Set.member var state.setVars
+
+
+loadOptions state options =
+    case options of
+        [] ->
+            Nothing
+
+        ( tests, template ) :: rest ->
+            if List.all (testPredicate state) tests then
+                Just template
+
+            else
+                loadOptions state rest
+
+
+loadSubscene subscene state accum =
+    case subscene of
+        Script.Paragraph markup rest ->
+            loadSubscene rest state (loadMarkup state markup :: accum)
+
+        Script.Set var rest ->
+            loadSubscene rest { state | setVars = Set.insert var state.setVars } accum
+
+        Script.Unset var rest ->
+            loadSubscene rest { state | setVars = Set.remove var state.setVars } accum
+
+        Script.Toggle var rest ->
+            loadSubscene rest
+                { state
+                    | setVars =
+                        if Set.member var state.setVars then
+                            Set.remove var state.setVars
+
+                        else
+                            Set.insert var state.setVars
+                }
+                accum
+
+        Script.Conditional options continuation ->
+            case ( continuation, loadOptions state options ) of
+                ( Nothing, Nothing ) ->
+                    loadSubscene Script.Return state accum
+
+                ( Nothing, Just rest ) ->
+                    loadSubscene rest state accum
+
+                ( Just rest, Nothing ) ->
+                    loadSubscene rest state accum
+
+                ( Just rest, Just subsubscene ) ->
+                    let
+                        ( newState, newAccum ) =
+                            loadSubscene subsubscene state accum
+                    in
+                    loadSubscene rest newState newAccum
+
+        Script.Return ->
+            ( state, accum )
+
+        Script.Choices { options, continuation } ->
+            ( state, [ Script.Problem "Choices where choices should not be" ] :: accum )
+
+
+loadScene scene state accum =
+    case scene of
+        Script.Paragraph markup rest ->
+            loadScene rest state (loadMarkup state markup :: accum)
+
+        Script.Set var rest ->
+            loadScene rest { state | setVars = Set.insert var state.setVars } accum
+
+        Script.Unset var rest ->
+            loadScene rest { state | setVars = Set.remove var state.setVars } accum
+
+        Script.Toggle var rest ->
+            loadScene rest
+                { state
+                    | setVars =
+                        if Set.member var state.setVars then
+                            Set.remove var state.setVars
+
+                        else
+                            Set.insert var state.setVars
+                }
+                accum
+
+        Script.Conditional options continuation ->
+            case ( continuation, loadOptions state options ) of
+                ( Nothing, Nothing ) ->
+                    loadScene Script.Return state accum
+
+                ( Nothing, Just rest ) ->
+                    loadScene rest state accum
+
+                ( Just rest, Nothing ) ->
+                    loadScene rest state accum
+
+                ( Just rest, Just subscene ) ->
+                    let
+                        ( newState, newAccum ) =
+                            loadSubscene subscene state accum
+                    in
+                    loadScene rest newState newAccum
+
+        Script.Return ->
             case state.callstack of
                 [] ->
-                    { state
-                        | current = { scene | contents = scene.contents ++ [ [ Script.Styled plain "Fin." ] ] }
-                    }
+                    { state | current = ( List.reverse accum ++ [ [ Script.Styled plain "Fin." ] ], [] ) }
 
                 choice :: rest ->
-                    { state
-                        | current = { scene | options = Just [ choice ] }
-                        , callstack = rest
-                    }
+                    { state | current = ( List.reverse accum, [ choice ] ), callstack = rest }
 
-        Just _ ->
-            case scene.continuation of
+        Script.Choices { options, continuation } ->
+            case continuation of
                 Nothing ->
-                    { state | current = scene }
+                    { state | current = ( List.reverse accum, options ) }
 
                 Just return ->
-                    { state | current = scene, callstack = return :: state.callstack }
+                    { state | current = ( List.reverse accum, options ), callstack = return :: state.callstack }
+
+
+loadMarkup state markup =
+    List.map (loadText state) markup |> List.concat
+
+
+loadText : ScriptState -> Script.Text -> List Script.Text
+loadText state text =
+    case text of
+        Script.Styled _ _ ->
+            [ text ]
+
+        Script.Problem _ ->
+            [ text ]
+
+        Script.InlineConditional { var, ifSet, ifUnset } ->
+            let
+                child =
+                    if Set.member var state.setVars then
+                        ifSet
+
+                    else
+                        ifUnset
+            in
+            case child of
+                Nothing ->
+                    []
+
+                Just markup ->
+                    loadMarkup state markup
 
 
 update : Msg -> Model -> ( Model, Cmd msg )
@@ -180,10 +313,10 @@ update msg model =
 
                 nextPrevious =
                     if option.vanishing then
-                        state.previous ++ [ ( state.current.contents, Nothing ) ]
+                        state.previous ++ [ ( Tuple.first state.current, Nothing ) ]
 
                     else
-                        state.previous ++ [ ( state.current.contents, Just option ) ]
+                        state.previous ++ [ ( Tuple.first state.current, Just option ) ]
             in
             case nextScene of
                 Just scene ->
@@ -196,10 +329,9 @@ update msg model =
                                 state.callstack
 
                         nextState =
-                            loadScene scene { state | callstack = callstack }
+                            loadScene scene.contents { state | callstack = callstack, previous = nextPrevious } []
                     in
-                    { model | state = Play { nextState | previous = nextPrevious } }
-                        |> pure
+                    { model | state = Play nextState } |> pure
 
                 Nothing ->
                     -- Error, can't (?) happen
@@ -220,10 +352,11 @@ update msg model =
                 scene :: _ ->
                     let
                         state =
-                            { previous = [], current = scene, callstack = [] }
+                            { previous = [], current = ( [], [] ), callstack = [], setVars = Set.empty }
                     in
-                    { model | state = Play <| loadScene scene state } |> pure
+                    { model | state = Play <| loadScene scene.contents state [] } |> pure
 
+        -- { model | state = Play <| loadScene scene state } |> pure
         ( ModeEdit, Play _ ) ->
             { model | state = Edit } |> pure
 
@@ -317,31 +450,6 @@ view model =
             ]
 
 
-
-{- }        , el [ height fill, width (px 600), Background.color (rgb255 100 100 100)] none
-   , el [ height fill, width (px 2), Background.color (rgb255 300 300 300) ] none
-   , el [ height fill, width fill, Background.color (rgb255 100 100 100)] none ]
--}
-{- }
-   Element.layout
-       [ height fill, width fill, Background.color bgcolor, inFront switch ]
-   <|
-       case model.state of
-           Play { previous, current } ->
-               Element.column
-                   [ width (px 700), height fill, padding 30, spacing 20, Background.color columncolor, centerX ]
-                   ((List.map viewPrevious previous |> List.concat)
-                       ++ viewCurrentScene current
-                   )
-
-           Edit ->
-               Input.multiline
-                   [ width (px 700), height fill, padding 20, Background.color columncolor, centerX, Font.family [ Font.typeface "Operator Mono SSm", Font.typeface "Source Code Pro", Font.monospace ], Font.size 12 ]
-                   { onChange = Code, text = model.code, placeholder = Nothing, label = Input.labelHidden "Wut", spellcheck = True }
-
--}
-
-
 commonButton =
     [ padding 10
     , Border.width 1
@@ -369,26 +477,20 @@ viewPrevious ( contents, selected ) =
            )
 
 
-viewCurrentScene : Script.Scene -> List (Element Msg)
-viewCurrentScene current =
-    List.map viewParagraph current.contents
-        ++ (case current.options of
-                Nothing ->
-                    []
-
-                Just options ->
-                    List.map
-                        (\option ->
-                            paragraph
-                                (Border.color activeButtonColor
-                                    :: Font.color activeButtonColor
-                                    :: Events.onClick (Select option)
-                                    :: commonButton
-                                )
-                                (List.map viewText option.text)
-                        )
-                        options
-           )
+viewCurrentScene : ( List (List Script.Text), List Script.Choice ) -> List (Element Msg)
+viewCurrentScene ( story, options ) =
+    List.map viewParagraph story
+        ++ List.map
+            (\option ->
+                paragraph
+                    (Border.color activeButtonColor
+                        :: Font.color activeButtonColor
+                        :: Events.onClick (Select option)
+                        :: commonButton
+                    )
+                    (List.map viewText option.text)
+            )
+            options
 
 
 viewParagraph : List Script.Text -> Element Msg
@@ -430,7 +532,10 @@ viewText section =
             el attrs (text str)
 
         Script.Problem str ->
-            el [] (el [ height (px 10), width (px 10), Background.color (rgb255 255 180 190) ] (text str))
+            el [] (el [ Background.color (rgb255 255 180 190), padding 10 ] (text str))
+
+        Script.InlineConditional f ->
+            el [] (el [ Background.color (rgb255 255 180 190), padding 10 ] (text <| "Error: unresolved inline conditional" ++ Debug.toString f))
 
 
 bgcolor : Color

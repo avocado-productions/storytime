@@ -1,7 +1,7 @@
 module Convert exposing (..)
 
 import Config
-import Loc
+import Loc exposing (Loc)
 import ScriptTypes as Script
 import Set exposing (Set)
 import Tuple
@@ -121,7 +121,7 @@ convert { prelude, sections } =
     in
     case scriptDFS (firstRawScene ++ restRawScenes) (Set.fromList [ firstKey ]) [ firstKey ] [] of
         Err msg ->
-            [ { key = "", contents = [ [ Script.Problem msg ] ], options = Nothing, continuation = Nothing } ]
+            [ { key = "", set = [], contents = Script.Paragraph [ Script.Problem msg ] Script.Return } ]
 
         Ok script ->
             script
@@ -140,13 +140,12 @@ scriptDFS script known frontier accum =
 
                 Ok rawScene ->
                     let
-                        ( scene, options ) =
-                            convertElements script rawScene.contents []
+                        contents =
+                            convertElements True script rawScene.contents
 
                         neighbors =
-                            optionsToNeighbors options
-                                |> List.filter
-                                    (\neighbor -> not (Set.member neighbor known))
+                            getNeighbors contents
+                                |> List.filter (\neighbor -> not (Set.member neighbor known))
 
                         newKnown =
                             List.foldr
@@ -156,25 +155,40 @@ scriptDFS script known frontier accum =
                     in
                     scriptDFS script newKnown (neighbors ++ rest) <|
                         ({ key = key
-                         , contents = scene
-                         , options = Maybe.map Tuple.first options
-                         , continuation = options |> Maybe.andThen Tuple.second
+                         , set = []
+                         , contents = contents
                          }
                             :: accum
                         )
 
 
-optionsToNeighbors : Maybe ( List Script.Choice, Maybe Script.Choice ) -> List Script.Key
-optionsToNeighbors options =
-    case options of
-        Nothing ->
+getNeighbors : Script.Template -> List Script.Key
+getNeighbors template =
+    case template of
+        Script.Paragraph _ rest ->
+            getNeighbors rest
+
+        Script.Conditional choices continuation ->
+            List.concat (List.map (Tuple.second >> getNeighbors) choices) ++ Maybe.withDefault [] (Maybe.map getNeighbors continuation)
+
+        Script.Choices { options, continuation } ->
+            let
+                conoption =
+                    Maybe.map List.singleton continuation |> Maybe.withDefault []
+            in
+            List.map .key (conoption ++ options)
+
+        Script.Set _ rest ->
+            getNeighbors rest
+
+        Script.Unset _ rest ->
+            getNeighbors rest
+
+        Script.Toggle _ rest ->
+            getNeighbors rest
+
+        Script.Return ->
             []
-
-        Just ( choices, Nothing ) ->
-            List.map .key choices
-
-        Just ( choices, Just cont ) ->
-            List.map .key (cont :: choices)
 
 
 convertChoice args parameters label =
@@ -213,55 +227,196 @@ convertChoice args parameters label =
             )
 
 
-convertElements : List Types.FlatPassage -> List Types.FlatElement -> List (List Script.Text) -> ( List (List Script.Text), Maybe ( List Script.Choice, Maybe Script.Choice ) )
-convertElements script elems accum =
+convertPredicateParameters : List (Loc Types.Parameter) -> Script.Predicate -> Result String Script.Predicate
+convertPredicateParameters parameters accum =
+    case parameters of
+        [] ->
+            Ok <| List.reverse accum
+
+        ( _, ( ( _, "isSet" ), [ ( _, Types.Variable var ) ] ) ) :: rest ->
+            convertPredicateParameters rest (( True, var ) :: accum)
+
+        ( _, ( ( _, "isUnset" ), [ ( _, Types.Variable var ) ] ) ) :: rest ->
+            convertPredicateParameters rest (( False, var ) :: accum)
+
+        ( _, ( ( _, key ), _ ) ) :: _ ->
+            Err <| "Unknown or ill-formed parameter " ++ key
+
+
+convertElements : Bool -> List Types.FlatPassage -> List Types.FlatElement -> Script.Template
+convertElements choicesAreAllowed script elems =
     case elems of
         [] ->
-            ( List.reverse accum, Nothing )
+            Script.Return
 
         (Types.Paragraph markup) :: rest ->
-            convertElements script rest (convertMarkup plain markup :: accum)
+            if a then
+                Script.Paragraph (convertMarkup plain markup) (convertElements choicesAreAllowed script rest)
 
-        [ Types.Command { mark, command, child } ] ->
-            if Loc.value mark /= Types.Bang then
-                ( List.reverse ([ Script.Problem "Only `!choices` or `!continue` commands allowed in text." ] :: accum), Nothing )
+            else if b then
+                Fopo
+
+            else if bar then
+                alsadfas
+
+            else if baz then
+                sdfa
 
             else
-                case ( command, child ) of
-                    ( ( Just ( _, "continue" ), ( args, parameters ) ), Types.Divert label ) ->
-                        case convertChoice args parameters label of
-                            Ok choice ->
-                                ( List.reverse accum, Just ( [ choice ], Nothing ) )
+                let
+                    foo =
+                        0
+                in
+                if boo then
+                    dsf
 
-                            Err str ->
-                                ( List.reverse ([ Script.Problem str ] :: accum), Nothing )
+                else
+                    sdf
 
-                    ( ( Just ( _, "choices" ), ( [], [] ) ), Types.Divert label ) ->
-                        case convertChoices script label of
-                            Err str ->
-                                ( List.reverse ([ Script.Problem str ] :: accum), Nothing )
+        (Types.Command { command, child }) :: rest ->
+            case ( command, child ) of
+                ( ( Just ( _, "set" ), ( [ ( _, Types.Variable var ) ], [] ) ), Types.None ) ->
+                    Script.Set var (convertElements choicesAreAllowed script rest)
 
-                            Ok choices ->
-                                ( List.reverse accum, Just choices )
+                ( ( Just ( _, "unset" ), ( [ ( _, Types.Variable var ) ], [] ) ), Types.None ) ->
+                    Script.Unset var (convertElements choicesAreAllowed script rest)
 
-                    _ ->
-                        ( List.reverse ([ Script.Problem "Unexpected or ill-formed command" ] :: accum), Nothing )
+                ( ( Just ( _, "toggle" ), ( [ ( _, Types.Variable var ) ], [] ) ), Types.None ) ->
+                    Script.Toggle var (convertElements choicesAreAllowed script rest)
 
-        _ :: rest ->
-            convertElements script rest ([ Script.Problem "Everything except for the last thing in a section must just be a paragraph" ] :: accum)
+                ( ( Just ( _, "if" ), ( [], parameters ) ), Types.Divert label ) ->
+                    case Result.map2 Tuple.pair (lookup label script) (convertPredicateParameters parameters []) of
+                        Err msg ->
+                            Script.Paragraph [ Script.Problem msg ] (convertElements choicesAreAllowed script rest)
+
+                        Ok ( subscript, params ) ->
+                            if List.length rest == 0 then
+                                Script.Conditional [ ( params, convertElements choicesAreAllowed script subscript.contents ) ]
+                                    Nothing
+
+                            else
+                                Script.Conditional [ ( params, convertElements False script subscript.contents ) ]
+                                    (Just <| convertElements choicesAreAllowed script rest)
+
+                ( ( Just ( _, "cond" ), ( [], [] ) ), Types.Divert label ) ->
+                    case convertConds (List.length rest == 0) script label of
+                        Err msg ->
+                            Script.Paragraph [ Script.Problem msg ] (convertElements choicesAreAllowed script rest)
+
+                        Ok conditionals ->
+                            if List.length rest == 0 then
+                                Script.Conditional conditionals Nothing
+
+                            else
+                                Script.Conditional conditionals (Just <| convertElements choicesAreAllowed script rest)
+
+                ( ( Just ( _, "continue" ), ( args, parameters ) ), Types.Divert label ) ->
+                    let
+                        anyProblem =
+                            if not choicesAreAllowed then
+                                \_ -> Script.Paragraph [ Script.Problem "!continue command in a non-terminal passage ignored" ] Script.Return
+
+                            else if List.length rest == 0 then
+                                identity
+
+                            else
+                                Script.Paragraph [ Script.Problem "A !continue can't be followed by other text or commands in a passage." ]
+                    in
+                    case convertChoice args parameters label of
+                        Ok choice ->
+                            anyProblem <| Script.Choices { options = [ choice ], continuation = Nothing }
+
+                        Err str ->
+                            anyProblem <| Script.Paragraph [ Script.Problem str ] Script.Return
+
+                ( ( Just ( _, "choices" ), ( [], [] ) ), Types.Divert label ) ->
+                    let
+                        anyProblem =
+                            if not choicesAreAllowed then
+                                \_ -> Script.Paragraph [ Script.Problem "!choice command in a non-terminal passage ignored" ] Script.Return
+
+                            else if List.length rest == 0 then
+                                identity
+
+                            else
+                                Script.Paragraph [ Script.Problem "A !choice can't be followed by other text or commands in a passage." ]
+                    in
+                    case convertChoices script label of
+                        Ok choices ->
+                            anyProblem <| Script.Choices choices
+
+                        Err str ->
+                            anyProblem <| Script.Paragraph [ Script.Problem str ] Script.Return
+
+                ( ( Just ( _, name ), _ ), _ ) ->
+                    Script.Paragraph [ Script.Problem <| "Unexpected or ill-formed command" ++ name ] Script.Return
+
+                ( ( Nothing, _ ), _ ) ->
+                    Script.Paragraph [ Script.Problem <| "Unexpected or ill-formed unnamed command" ] Script.Return
+
+        (Types.Problem { problem }) :: rest ->
+            Script.Paragraph [ Script.Problem problem ] (convertElements choicesAreAllowed script rest)
+
+        _ ->
+            Script.Paragraph [ Script.Problem "Unexpected element in this passage" ] Script.Return
 
 
-convertChoices : List Types.FlatPassage -> Types.Label -> Result String ( List Script.Choice, Maybe Script.Choice )
+convertConds choicesAreAllowed script label =
+    lookup label script
+        |> Result.andThen (\{ contents } -> convertCondsImpl choicesAreAllowed script contents [])
+
+
+convertChoices : List Types.FlatPassage -> Types.Label -> Result String { options : List Script.Choice, continuation : Maybe Script.Choice }
 convertChoices script label =
     lookup label script
-        |> Result.andThen (\{ contents } -> convertChoicesImpl script contents ( [], Nothing ))
+        |> Result.andThen (\{ contents } -> convertChoicesImpl script contents { options = [], continuation = Nothing })
 
 
-convertChoicesImpl : List Types.FlatPassage -> List Types.FlatElement -> ( List Script.Choice, Maybe Script.Choice ) -> Result String ( List Script.Choice, Maybe Script.Choice )
-convertChoicesImpl script options ( accumChoices, accumCont ) =
+convertCondsImpl choicesAreAllowed script conditionals accum =
+    case conditionals of
+        [] ->
+            Ok <| List.reverse accum
+
+        (Types.Command { command, child }) :: rest ->
+            case ( command, child ) of
+                ( ( Just ( _, "if" ), ( [], parameters ) ), Types.Divert label ) ->
+                    Result.map2 Tuple.pair (lookup label script) (convertPredicateParameters parameters [])
+                        |> Result.andThen
+                            (\( { contents }, params ) ->
+                                convertCondsImpl choicesAreAllowed script rest <|
+                                    ( params, convertElements choicesAreAllowed script contents )
+                                        :: accum
+                            )
+
+                ( ( Just ( _, "default" ), ( [], [] ) ), Types.Divert label ) ->
+                    if List.length rest > 0 then
+                        Err <| "A ?default case has to come last, but here it is followed by " ++ String.fromInt (List.length rest) ++ " more element(s)."
+
+                    else
+                        lookup label script
+                            |> Result.andThen
+                                (\{ contents } ->
+                                    Ok <| List.reverse (( [], convertElements choicesAreAllowed script contents ) :: accum)
+                                )
+
+                ( ( Just ( _, cmd ), _ ), _ ) ->
+                    Err <| "Unknown or ill-formed subcommand " ++ cmd
+
+                ( ( Nothing, _ ), _ ) ->
+                    Err <| "Cond statements cannot have unnamed subcommands"
+
+        (Types.Problem { problem }) :: _ ->
+            Err problem
+
+        _ ->
+            Err "A !cond command can only contain subcommands."
+
+
+convertChoicesImpl : List Types.FlatPassage -> List Types.FlatElement -> { options : List Script.Choice, continuation : Maybe Script.Choice } -> Result String { options : List Script.Choice, continuation : Maybe Script.Choice }
+convertChoicesImpl script options accum =
     case options of
         [] ->
-            Ok ( List.reverse accumChoices, accumCont )
+            Ok { accum | options = List.reverse accum.options }
 
         (Types.Command { mark, command, child }) :: rest ->
             if Loc.value mark /= Types.Huh then
@@ -274,17 +429,17 @@ convertChoicesImpl script options ( accumChoices, accumCont ) =
                             |> Result.andThen
                                 (\choice ->
                                     convertChoicesImpl script rest <|
-                                        ( choice :: accumChoices, accumCont )
+                                        { accum | options = choice :: accum.options }
                                 )
 
                     ( ( Just ( _, "continue" ), ( args, parameters ) ), Types.Divert label ) ->
                         convertChoice args parameters label
                             |> Result.andThen
                                 (\choice ->
-                                    case accumCont of
+                                    case accum.continuation of
                                         Nothing ->
                                             convertChoicesImpl script rest <|
-                                                ( accumChoices, Just choice )
+                                                { accum | continuation = Just choice }
 
                                         _ ->
                                             Err "Multiple continues inside of a `!choices` command."
@@ -364,8 +519,31 @@ convertText style text =
                 :: convertMarkup style contents
                 ++ [ Script.Styled style "”" ]
 
+        Types.Annotation ( _, "[" ) _ _ (Just ( _, ( Just ( _, var ), ( [], params ) ) )) ->
+            case convertInlineConditional style params { var = var, ifSet = Nothing, ifUnset = Nothing } of
+                Ok cond ->
+                    [ Script.InlineConditional cond ]
+
+                Err msg ->
+                    [ Script.Problem msg ]
+
         _ ->
             [ Script.Problem "Unexpected annotation" ]
+
+
+convertInlineConditional style params accum =
+    case params of
+        [] ->
+            Ok accum
+
+        ( _, ( ( _, "isSet" ), [ ( _, Types.Markup markup ) ] ) ) :: rest ->
+            convertInlineConditional style rest { accum | ifSet = Just <| convertMarkup style markup }
+
+        ( _, ( ( _, "isUnset" ), [ ( _, Types.Markup markup ) ] ) ) :: rest ->
+            convertInlineConditional style rest { accum | ifUnset = Just <| convertMarkup style markup }
+
+        ( _, ( ( _, param ), _ ) ) :: _ ->
+            Err ("Unknown parameter " ++ param)
 
 
 convertMarkup : Script.Style -> List Types.Text -> List Script.Text

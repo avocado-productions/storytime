@@ -1,4 +1,4 @@
-module ScriptTypes exposing (Choice, Key, Scene, Script, Style, Text(..))
+module ScriptTypes exposing (Choice, Key, Predicate, Scene, Script, Style, Template(..), Text(..), Var)
 
 
 type alias Style =
@@ -12,9 +12,28 @@ type alias Style =
 type Text
     = Styled Style String
     | Problem String
+    | InlineConditional { var : Var, ifSet : Maybe (List Text), ifUnset : Maybe (List Text) }
+
+
+type Template
+    = Paragraph (List Text) Template
+    | Conditional (List ( Predicate, Template )) (Maybe Template)
+    | Choices { options : List Choice, continuation : Maybe Choice }
+    | Set Var Template
+    | Unset Var Template
+    | Toggle Var Template
+    | Return
+
+
+type alias Predicate =
+    List ( Bool, Var )
 
 
 type alias Key =
+    String
+
+
+type alias Var =
     String
 
 
@@ -28,9 +47,8 @@ type alias Choice =
 
 type alias Scene =
     { key : String
-    , contents : List (List Text)
-    , options : Maybe (List Choice)
-    , continuation : Maybe Choice
+    , set : List Var
+    , contents : Template
     }
 
 
