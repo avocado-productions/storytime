@@ -1,10 +1,11 @@
 port module App exposing (main)
 
 import Browser
+import Camperdown
+import Check.Names
 import Cmd.Extra exposing (pure)
 import Config
 import Convert
-import Display
 import Element exposing (..)
 import Element.Background as Background
 import Element.Border as Border
@@ -17,7 +18,6 @@ import Occurs exposing (Occurs(..))
 import Parse
 import ScriptTypes as Script exposing (Key)
 import Set exposing (Set)
-import Types
 import View
 
 
@@ -29,6 +29,28 @@ main =
         , update = update
         , subscriptions = subscriptions
         }
+
+
+parse contents =
+    Parse.parse config contents
+        |> Check.Names.convert
+            (Check.Names.lookupAcceptThese
+                { emptyCommands = False
+                , commands = [ "continue", "choices", "set", "cond", "if", "toggle", "unset" ]
+                , emptySubcommands = True
+                , subcommands = [ "if", "default", "continue" ]
+                , verbatims = []
+                , annotations =
+                    [ ( "**", "**", Nothing )
+                    , ( "*", "*", Nothing )
+                    , ( "__", "__", Nothing )
+                    , ( "_", "_", Nothing )
+                    , ( "\"", "\"", Nothing )
+                    , ( "[", "]", Just (Just "if") )
+                    ]
+                , parameters = [ "vanishing", "isSet", "isUnset", "break" ]
+                }
+            )
 
 
 colors =
@@ -50,7 +72,6 @@ config =
         , { startSymbol = "*", endSymbol = "*", commandOccursAfterwards = Never }
         , { startSymbol = "__", endSymbol = "__", commandOccursAfterwards = Never }
         , { startSymbol = "_", endSymbol = "_", commandOccursAfterwards = Never }
-        , { startSymbol = "~", endSymbol = "~", commandOccursAfterwards = Never }
         , { startSymbol = "~", endSymbol = "~", commandOccursAfterwards = Never }
         , { startSymbol = "\"", endSymbol = "\"", commandOccursAfterwards = Never }
         , { startSymbol = "[", endSymbol = "]", commandOccursAfterwards = Always }
@@ -76,9 +97,13 @@ config =
 -- Model
 
 
+type alias Document =
+    Camperdown.Document (Camperdown.Divert String String Char ( String, String, Maybe String ) String) String String Char ( String, String, Maybe String ) String
+
+
 type alias Model =
     { code : String
-    , camperdown : Types.ParsedDocument
+    , camperdown : Document
     , script : Script.Script
     , state : State
     }
@@ -120,7 +145,7 @@ It made no difference at all.
 It made all the difference."""
 
         camperdown =
-            Parse.parse config contents
+            parse contents
 
         script =
             Convert.convert camperdown
@@ -340,7 +365,7 @@ update msg model =
         ( Code code, Edit ) ->
             let
                 camperdown =
-                    Parse.parse config code
+                    parse code
             in
             ( { model | code = code, camperdown = camperdown, script = Convert.convert camperdown }, contentsUpdated code )
 
@@ -437,8 +462,7 @@ view model =
                             { onChange = Code, text = model.code, placeholder = Nothing, label = Input.labelHidden "Wut", spellcheck = True }
                         , el [ height fill, width (px 2), Background.color colors.gray1 ] none
                         , column [ height fill, width fill, padding 20, spacing 20, scrollbarY, clipX, Background.color colors.gray1 ] <|
-                            View.viewElements (Display.rewrite model.camperdown.prelude)
-                                :: List.map View.viewPassage model.camperdown.sections
+                            View.view model.code model.camperdown
                         ]
 
                 Play { previous, current } ->
