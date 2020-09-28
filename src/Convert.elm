@@ -2,37 +2,38 @@ module Convert exposing (..)
 
 import Camperdown as Camp
 import Loc exposing (Loc)
+import Traversal
 import ScriptTypes as Script
 import Set exposing (Set)
 import Tuple
 
 
 type alias Divert =
-    Camp.Divert String String Char ( String, String, Maybe String ) String
+    Camp.Divert (Camp.Mark String) Char ( String, String, Maybe String ) String
 
 
 type alias NestedDocument =
-    Camp.Document Divert String String Char ( String, String, Maybe String ) String
+    Camp.Document Divert (Camp.Mark String) Char ( String, String, Maybe String ) String
 
 
 type alias NestedSection =
-    Camp.Section Divert String String Char ( String, String, Maybe String ) String
+    Camp.Section Divert (Camp.Mark String) Char ( String, String, Maybe String ) String
 
 
 type alias NestedElement =
-    Camp.Element Divert String String Char ( String, String, Maybe String ) String
+    Camp.Element Divert (Camp.Mark String) Char ( String, String, Maybe String ) String
 
 
 type alias FlatDocument =
-    Camp.Document Camp.Label String String Char ( String, String, Maybe String ) String
+    Camp.Document Camp.Label (Camp.Mark String) Char ( String, String, Maybe String ) String
 
 
 type alias FlatSection =
-    Camp.Section Camp.Label String String Char ( String, String, Maybe String ) String
+    Camp.Section Camp.Label (Camp.Mark String) Char ( String, String, Maybe String ) String
 
 
 type alias FlatElement =
-    Camp.Element Camp.Label String String Char ( String, String, Maybe String ) String
+    Camp.Element Camp.Label (Camp.Mark String) Char ( String, String, Maybe String ) String
 
 
 type alias Parameter =
@@ -50,119 +51,87 @@ type alias Value =
 nextifySection : Maybe Camp.Label -> NestedSection -> List FlatSection
 nextifySection next { level, contents, label } =
     let
-        ( newContents, newPassages ) =
+        ( newPassages, newContents ) =
             nextify next contents
     in
     { level = level, contents = newContents, label = label }
         :: newPassages
 
 
-nextify : Maybe Camp.Label -> List NestedElement -> ( List FlatElement, List FlatSection )
+nextify : Maybe Camp.Label -> List NestedElement -> ( List FlatSection, List FlatElement )
 nextify next elems =
-    List.map (nextifyElement next) elems
+    List.map (nextifyElement next >> flattenElement) elems
         |> List.unzip
-        |> Tuple.mapSecond List.concat
-
-nextifyChild lines next child =
-    case child of
-        Nothing ->
-            ( Ok Nothing, [] )
-
-        Just (Camp.Pointy ( loc, "next" )) ->
-            case next of
-                Nothing ->
-                    ( Err <|
-                        Camp.Problem
-                            { lines = lines
-                            , loc = loc
-                            , problem = "You can't use the `next` label in the last step of a block."
-                            }
-                    , []
-                    )
-
-                Just ref ->
-                    ( Ok <| Just ref , [] )
-
-        Just (Camp.Pointy ref) ->
-            ( Ok <| Just (Camp.Named ref), [] )
-
-        Just (Camp.Immediate children) ->
-            let
-                ( newChildren, newPassages ) =
-                    nextify next children
-
-                label =
-                    Camp.Anonymous lines.start
-            in
-            ( Ok <| Just label
-            , { level = 2
-              , contents = newChildren
-              , label = label
-              }
-                :: newPassages
-            )
-
-        Just (Camp.Nested children) ->
-            let
-                ( newChildren, newPassages ) =
-                    nextify next children
-
-                label =
-                    Camp.Anonymous lines.start
-            in
-            ( Ok <| Just label
-            , { level = 2
-              , contents = newChildren
-              , label = label
-              }
-                :: newPassages
-            )
+        |> Tuple.mapFirst List.concat
 
 
-nextifyElement : Maybe Camp.Label -> NestedElement -> ( FlatElement, List FlatSection )
-nextifyElement next elem =
-    case elem of
-        Camp.Paragraph text ->
-            ( Camp.Paragraph text, [] )
+type IntermediateDivert
+    = Pointy Camp.Label
+    | Nested (List (Camp.Element IntermediateDivert (Camp.Mark String) Char ( String, String, Maybe String ) String))
+    | Immediate (List (Camp.Element IntermediateDivert (Camp.Mark String) Char ( String, String, Maybe String ) String))
 
-        Camp.Preformatted block ->
-            ( Camp.Preformatted block, [] )
 
-        Camp.Item { lines, children } ->
-            let
-                ( newChildren, passages ) =
-                    nextify next children
-            in
-            ( Camp.Item { lines = lines, children = newChildren }
-            , passages
-            )
+nextifyElement next =
+    Traversal.mapWithProblems
+        (\_ _ child ->
+            case child of
+                Camp.Pointy ( loc, "next" ) ->
+                    case next of
+                        Nothing ->
+                            Err ( loc, "You can't use the `next` label in the last section." )
 
-        Camp.Subcommand { lines, subcommand, child } ->
-            let
-                ( result, passages ) =
-                    nextifyChild lines next child
-            in
-            case result of
-                Err msg ->
-                    ( msg, passages )
+                        Just ref ->
+                            Ok <| Pointy ref
 
-                Ok newChild ->
-                    ( Camp.Subcommand { lines = lines, subcommand = subcommand, child = newChild }, passages )
+                Camp.Pointy label ->
+                    Ok <| Pointy (Camp.Named label)
 
-        Camp.Command { lines, command, child } ->
-            let
-                ( result, passages ) =
-                    nextifyChild lines next child
-            in
-            case result of
-                Err msg ->
-                    ( msg, passages )
+                Camp.Nested contents ->
+                    Ok <| Nested (List.map (nextifyElement next) contents)
 
-                Ok newChild ->
-                    ( Camp.Command { lines = lines, command = command, child = newChild }, passages )
+                Camp.Immediate contents ->
+                    Ok <| Immediate (List.map (nextifyElement next) contents)
+        )
 
-        Camp.Problem problem ->
-            ( Camp.Problem problem, [] )
+
+flattenElement =
+    Traversal.mapAccum
+        (\lines _ child accum ->
+            case child of
+                Pointy ref ->
+                    ( [], ref )
+
+                Nested children ->
+                    let
+                        ( newAccum, newChildren ) =
+                            List.map flattenElement children
+                                |> List.unzip
+                                |> Tuple.mapFirst List.concat
+
+                        label =
+                            Camp.Anonymous lines.start
+
+                        new =
+                            { level = 2, contents = newChildren, label = label }
+                    in
+                    ( new :: newAccum ++ accum, label )
+
+                Immediate children ->
+                    let
+                        ( newAccum, newChildren ) =
+                            List.map flattenElement children
+                                |> List.unzip
+                                |> Tuple.mapFirst List.concat
+
+                        label =
+                            Camp.Anonymous lines.start
+
+                        new =
+                            { level = 2, contents = newChildren, label = label }
+                    in
+                    ( new :: newAccum ++ accum, label )
+        )
+        []
 
 
 convert : NestedDocument -> Script.Script
@@ -321,16 +290,16 @@ convertElements choicesAreAllowed script elems =
 
         (Camp.Command { command, child }) :: rest ->
             case ( command, child ) of
-                ( ( "set", ( [ ( _, Camp.Variable var ) ], [] ) ), Nothing ) ->
+                ( ( Camp.Bang "set", ( [ ( _, Camp.Variable var ) ], [] ) ), Nothing ) ->
                     Script.Set var (convertElements choicesAreAllowed script rest)
 
-                ( ( "unset", ( [ ( _, Camp.Variable var ) ], [] ) ), Nothing ) ->
+                ( ( Camp.Bang "unset", ( [ ( _, Camp.Variable var ) ], [] ) ), Nothing ) ->
                     Script.Unset var (convertElements choicesAreAllowed script rest)
 
-                ( ( "toggle", ( [ ( _, Camp.Variable var ) ], [] ) ), Nothing ) ->
+                ( ( Camp.Bang "toggle", ( [ ( _, Camp.Variable var ) ], [] ) ), Nothing ) ->
                     Script.Toggle var (convertElements choicesAreAllowed script rest)
 
-                ( ( "if", ( [], parameters ) ), Just label ) ->
+                ( ( Camp.Bang "if", ( [], parameters ) ), Just label ) ->
                     case Result.map2 Tuple.pair (lookup label script) (convertPredicateParameters parameters []) of
                         Err msg ->
                             Script.Paragraph [ Script.Problem msg ] (convertElements choicesAreAllowed script rest)
@@ -344,7 +313,7 @@ convertElements choicesAreAllowed script elems =
                                 Script.Conditional [ ( params, convertElements False script subscript.contents ) ]
                                     (Just <| convertElements choicesAreAllowed script rest)
 
-                ( ( "cond", ( [], [] ) ), Just label ) ->
+                ( ( Camp.Bang "cond", ( [], [] ) ), Just label ) ->
                     case convertConds (List.length rest == 0) script label of
                         Err msg ->
                             Script.Paragraph [ Script.Problem msg ] (convertElements choicesAreAllowed script rest)
@@ -356,7 +325,7 @@ convertElements choicesAreAllowed script elems =
                             else
                                 Script.Conditional conditionals (Just <| convertElements choicesAreAllowed script rest)
 
-                ( ( "continue", ( args, parameters ) ), Just label ) ->
+                ( ( Camp.Bang "continue", ( args, parameters ) ), Just label ) ->
                     let
                         anyProblem =
                             if not choicesAreAllowed then
@@ -375,7 +344,7 @@ convertElements choicesAreAllowed script elems =
                         Err str ->
                             anyProblem <| Script.Paragraph [ Script.Problem str ] Script.Return
 
-                ( ( "choices", ( [], [] ) ), Just label ) ->
+                ( ( Camp.Bang "choices", ( [], [] ) ), Just label ) ->
                     let
                         anyProblem =
                             if not choicesAreAllowed then
@@ -394,8 +363,11 @@ convertElements choicesAreAllowed script elems =
                         Err str ->
                             anyProblem <| Script.Paragraph [ Script.Problem str ] Script.Return
 
-                ( ( name, _ ), _ ) ->
-                    Script.Paragraph [ Script.Problem <| "Unexpected or ill-formed command" ++ name ] Script.Return
+                ( ( Camp.Bang name, _ ), _ ) ->
+                    Script.Paragraph [ Script.Problem <| "Unexpected or ill-formed command !" ++ name ] Script.Return
+
+                ( ( Camp.Huh name, _ ), _ ) ->
+                    Script.Paragraph [ Script.Problem <| "This is not a place where we expect subcommands like ?" ++ name ] Script.Return
 
         (Camp.Problem { problem }) :: rest ->
             Script.Paragraph [ Script.Problem problem ] (convertElements choicesAreAllowed script rest)
@@ -422,7 +394,7 @@ convertCondsImpl choicesAreAllowed script conditionals accum =
 
         (Camp.Command { command, child }) :: rest ->
             case ( command, child ) of
-                ( ( "if", ( [], parameters ) ), Just label ) ->
+                ( ( Camp.Huh "if", ( [], parameters ) ), Just label ) ->
                     Result.map2 Tuple.pair (lookup label script) (convertPredicateParameters parameters [])
                         |> Result.andThen
                             (\( { contents }, params ) ->
@@ -431,7 +403,7 @@ convertCondsImpl choicesAreAllowed script conditionals accum =
                                         :: accum
                             )
 
-                ( ( "default", ( [], [] ) ), Just label ) ->
+                ( ( Camp.Huh "default", ( [], [] ) ), Just label ) ->
                     if List.length rest > 0 then
                         Err <| "A ?default case has to come last, but here it is followed by " ++ String.fromInt (List.length rest) ++ " more element(s)."
 
@@ -442,8 +414,11 @@ convertCondsImpl choicesAreAllowed script conditionals accum =
                                     Ok <| List.reverse (( [], convertElements choicesAreAllowed script contents ) :: accum)
                                 )
 
-                ( ( cmd, _ ), _ ) ->
-                    Err <| "Unknown or ill-formed subcommand " ++ cmd
+                ( ( Camp.Huh cmd, _ ), _ ) ->
+                    Err <| "Unknown or ill-formed subcommand ?" ++ cmd ++ Debug.toString conditionals
+
+                ( ( Camp.Bang cmd, _ ), _ ) ->
+                    Err <| "Unexpected position for a command !" ++ cmd
 
         (Camp.Problem { problem }) :: _ ->
             Err problem
@@ -461,9 +436,9 @@ convertChoicesImpl script options accum =
         [] ->
             Ok { accum | options = List.reverse accum.options }
 
-        (Camp.Subcommand { subcommand, child }) :: rest ->
-            case ( subcommand, child ) of
-                ( ( "(none)", ( args, parameters ) ), Just label ) ->
+        (Camp.Command {command, child }) :: rest ->
+            case ( command, child ) of
+                ( ( Camp.Huh "(none)", ( args, parameters ) ), Just label ) ->
                     convertChoice args parameters label
                         |> Result.andThen
                             (\choice ->
@@ -471,7 +446,7 @@ convertChoicesImpl script options accum =
                                     { accum | options = choice :: accum.options }
                             )
 
-                ( ( "continue", ( args, parameters ) ), Just label ) ->
+                ( ( Camp.Huh "continue", ( args, parameters ) ), Just label ) ->
                     convertChoice args parameters label
                         |> Result.andThen
                             (\choice ->
@@ -504,6 +479,14 @@ plain =
 
 
 lookup label sections =
+    let
+        eq x y =
+            case (x, y) of
+               (Camp.Named (_, a), Camp.Named (_, b)) -> a == b
+               (Camp.Anonymous a, Camp.Anonymous b) -> a == b
+               _ -> False 
+
+    in
     case sections of
         [] ->
             case label of
@@ -514,7 +497,7 @@ lookup label sections =
                     Err <| "Lookup error for section on line " ++ String.fromInt n
 
         section :: rest ->
-            if label == section.label then
+            if eq label section.label then
                 Ok section
 
             else

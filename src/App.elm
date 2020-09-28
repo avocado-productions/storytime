@@ -98,7 +98,7 @@ config =
 
 
 type alias Document =
-    Camperdown.Document (Camperdown.Divert String String Char ( String, String, Maybe String ) String) String String Char ( String, String, Maybe String ) String
+    Camperdown.Document (Camperdown.Divert (Camperdown.Mark String) Char ( String, String, Maybe String ) String) (Camperdown.Mark String) Char ( String, String, Maybe String ) String
 
 
 type alias Model =
