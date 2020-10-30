@@ -1,9 +1,10 @@
 port module App exposing (main)
 
 import Browser
+import Browser.Dom
 import Camperdown
 import Check.Names
-import Cmd.Extra exposing (pure)
+import Cmd.Extra exposing (pure, with)
 import Config
 import Convert
 import Element exposing (..)
@@ -13,11 +14,13 @@ import Element.Events as Events
 import Element.Font as Font
 import Element.Input as Input
 import Html exposing (Html)
+import Html.Attributes as Attributes
 import Json.Decode as Decode
 import Occurs exposing (Occurs(..))
 import Parse
 import ScriptTypes as Script exposing (Key)
 import Set exposing (Set)
+import Task
 import View
 
 
@@ -36,19 +39,23 @@ parse contents =
         |> Check.Names.convert
             (Check.Names.lookupAcceptThese
                 { emptyCommands = False
-                , commands = [ "continue", "choices", "set", "cond", "if", "toggle", "unset" ]
+                , commands = [ "continue", "pause", "choice", "set", "cond", "toggle", "unset" ]
                 , emptySubcommands = True
                 , subcommands = [ "if", "default", "continue" ]
                 , verbatims = []
                 , annotations =
-                    [ ( "**", "**", Nothing )
-                    , ( "*", "*", Nothing )
-                    , ( "__", "__", Nothing )
-                    , ( "_", "_", Nothing )
-                    , ( "\"", "\"", Nothing )
-                    , ( "[", "]", Just (Just "if") )
+                    [ ( "**", Just "**", Nothing )
+                    , ( "*", Just "*", Nothing )
+                    , ( "__", Just "__", Nothing )
+                    , ( "_", Just "_", Nothing )
+                    , ( "~", Just "~", Nothing )
+                    , ( "\"", Just "\"", Nothing )
+                    , ( "...", Nothing, Nothing )
+                    , ( "--", Nothing, Nothing )
+                    , ( "---", Nothing, Nothing )
+                    , ( "[", Just "]", Just (Just "if") )
                     ]
-                , parameters = [ "vanishing", "isSet", "isUnset", "break" ]
+                , parameters = [ "vanishing", "isSet", "isUnset" ]
                 }
             )
 
@@ -66,21 +73,37 @@ port contentsUpdated : String -> Cmd msg
 
 config : Config.ParserConfig
 config =
-    { verbatimOpts = Set.fromList []
+    { verbatimOpts = Set.fromList [ '`', '$' ]
     , annotationOpts =
-        [ { startSymbol = "**", endSymbol = "**", commandOccursAfterwards = Never }
-        , { startSymbol = "*", endSymbol = "*", commandOccursAfterwards = Never }
-        , { startSymbol = "__", endSymbol = "__", commandOccursAfterwards = Never }
-        , { startSymbol = "_", endSymbol = "_", commandOccursAfterwards = Never }
-        , { startSymbol = "~", endSymbol = "~", commandOccursAfterwards = Never }
-        , { startSymbol = "\"", endSymbol = "\"", commandOccursAfterwards = Never }
-        , { startSymbol = "[", endSymbol = "]", commandOccursAfterwards = Always }
+        [ { startSymbol = "**", endSymbol = Just "**", commandOccursAfterwards = Never }
+        , { startSymbol = "*", endSymbol = Just "*", commandOccursAfterwards = Never }
+        , { startSymbol = "__", endSymbol = Just "__", commandOccursAfterwards = Never }
+        , { startSymbol = "_", endSymbol = Just "_", commandOccursAfterwards = Never }
+        , { startSymbol = "~", endSymbol = Just "~", commandOccursAfterwards = Never }
+        , { startSymbol = "\"", endSymbol = Just "\"", commandOccursAfterwards = Never }
+        , { startSymbol = "...", endSymbol = Nothing, commandOccursAfterwards = Never }
+        , { startSymbol = "---", endSymbol = Nothing, commandOccursAfterwards = Never }
+        , { startSymbol = "--", endSymbol = Nothing, commandOccursAfterwards = Never }
+        , { startSymbol = "[", endSymbol = Just "]", commandOccursAfterwards = Always }
         ]
-    , replacements = [ ( "...", "…" ), ( "---", "—" ), ( "--", "–" ) ]
-    , replacementFirstChars = Set.fromList [ '.', '-' ]
-    , escapable = Set.fromList [ '\\', '\'', '#', '!', '?', ':', '[', ']', '(', ')', '*', '_', '~', '"', '.', '-' ]
-    , meaningful = Set.fromList [ '\\', '[', ']', '\n', '*', '_', '~', '"', '.', '-' ]
-    , markers = [ "!", "?", "#", ":" ]
+    , -- This is the set of all of the first chars of annotations (start or end)
+      -- It is critical that ']' NOT be in this set: that's how values like `! foo [some text]`
+      -- stop parsing the embedded markup `some text` before grabbing onto the final `]`.
+      annotationFirstChars = Set.fromList [ '*', '[', '_', '~', '"', '.', '-', '&' ]
+    , -- defined by negation:
+      -- *non*-meaningful chars can't possibly be the start of a command or interesting feature
+      -- meaningful chars have to be explicitly gobbled somewhere or they'll be treated as unknown and
+      -- unallowed markup errors
+      --  - automatically meaningful: '\\', ']', '\n'
+      --  - also meaningful: annotationFirstChars
+      meaningful = Set.fromList [ '\\', ']', '\n', '.', '-', '`', '*', '[', '_', '~', '"', '&' ]
+    , -- Escapable should be the union of meaningful chars, and first chars of starters
+      --  - automatically escapable: '\\', '[', ']', '!', '?', ':', '(', ')'
+      --  - also escapable: annotationFirstChars
+      --  - also escapable: first chars of verbatimMarkers
+      --  - also escapable: verbatimOpts
+      escapable = Set.fromList [ '\\', '\'', '!', '?', '#', '[', ']', '(', ')', '.', '-', '`', '$', '*', '_', '~', '"', '&' ]
+    , verbatimMarkers = [ "%%%", "$$$", "```" ]
     }
 
 
@@ -98,7 +121,7 @@ config =
 
 
 type alias Document =
-    Camperdown.Document (Camperdown.Divert (Camperdown.Mark String) Char ( String, String, Maybe String ) String) (Camperdown.Mark String) Char ( String, String, Maybe String ) String
+    Camperdown.Document (Camperdown.Divert (Camperdown.Mark String) Char ( String, Maybe String, Maybe String ) String) (Camperdown.Mark String) Char ( String, Maybe String, Maybe String ) String
 
 
 type alias Model =
@@ -117,7 +140,6 @@ type State
 type alias ScriptState =
     { previous : List ( List (List Script.Text), Maybe Script.Choice )
     , current : ( List (List Script.Text), List Script.Choice )
-    , callstack : List Script.Choice
     , setVars : Set String
     }
 
@@ -132,7 +154,7 @@ and be one traveler, long I stood
 and looked down one as far as I could
 to where it bent in the undergrowth.
 
-! choices vv
+! choice vv
 ? [Take the first, slightly less grassy and worn.]
   -> road more traveled
 ? [Take the second, grassy and perhaps wanting wear.]
@@ -167,6 +189,7 @@ type Msg
     | Code String
     | ModeEdit
     | ModePlay
+    | NoOp
 
 
 plain =
@@ -188,54 +211,6 @@ loadOptions state options =
 
             else
                 loadOptions state rest
-
-
-loadSubscene subscene state accum =
-    case subscene of
-        Script.Paragraph markup rest ->
-            loadSubscene rest state (loadMarkup state markup :: accum)
-
-        Script.Set var rest ->
-            loadSubscene rest { state | setVars = Set.insert var state.setVars } accum
-
-        Script.Unset var rest ->
-            loadSubscene rest { state | setVars = Set.remove var state.setVars } accum
-
-        Script.Toggle var rest ->
-            loadSubscene rest
-                { state
-                    | setVars =
-                        if Set.member var state.setVars then
-                            Set.remove var state.setVars
-
-                        else
-                            Set.insert var state.setVars
-                }
-                accum
-
-        Script.Conditional options continuation ->
-            case ( continuation, loadOptions state options ) of
-                ( Nothing, Nothing ) ->
-                    loadSubscene Script.Return state accum
-
-                ( Nothing, Just rest ) ->
-                    loadSubscene rest state accum
-
-                ( Just rest, Nothing ) ->
-                    loadSubscene rest state accum
-
-                ( Just rest, Just subsubscene ) ->
-                    let
-                        ( newState, newAccum ) =
-                            loadSubscene subsubscene state accum
-                    in
-                    loadSubscene rest newState newAccum
-
-        Script.Return ->
-            ( state, accum )
-
-        Script.Choices { options, continuation } ->
-            ( state, [ Script.Problem "Choices where choices should not be" ] :: accum )
 
 
 loadScene scene state accum =
@@ -261,39 +236,19 @@ loadScene scene state accum =
                 }
                 accum
 
-        Script.Conditional options continuation ->
-            case ( continuation, loadOptions state options ) of
-                ( Nothing, Nothing ) ->
-                    loadScene Script.Return state accum
-
-                ( Nothing, Just rest ) ->
-                    loadScene rest state accum
-
-                ( Just rest, Nothing ) ->
-                    loadScene rest state accum
-
-                ( Just rest, Just subscene ) ->
-                    let
-                        ( newState, newAccum ) =
-                            loadSubscene subscene state accum
-                    in
-                    loadScene rest newState newAccum
-
-        Script.Return ->
-            case state.callstack of
-                [] ->
-                    { state | current = ( List.reverse accum ++ [ [ Script.Styled plain "Fin." ] ], [] ) }
-
-                choice :: rest ->
-                    { state | current = ( List.reverse accum, [ choice ] ), callstack = rest }
-
-        Script.Choices { options, continuation } ->
-            case continuation of
+        Script.Conditional options ->
+            case loadOptions state options of
                 Nothing ->
-                    { state | current = ( List.reverse accum, options ) }
+                    { state | current = ( List.reverse accum ++ [ [ Script.Styled plain "(out of options)" ] ], [] ) }
 
-                Just return ->
-                    { state | current = ( List.reverse accum, options ), callstack = return :: state.callstack }
+                Just rest ->
+                    loadScene rest state accum
+
+        Script.Fin ->
+            { state | current = ( List.reverse accum ++ [ [ Script.Styled plain "Fin." ] ], [] ) }
+
+        Script.Choices options ->
+            { state | current = ( List.reverse accum, options ) }
 
 
 loadMarkup state markup =
@@ -309,24 +264,34 @@ loadText state text =
         Script.Problem _ ->
             [ text ]
 
-        Script.InlineConditional { var, ifSet, ifUnset } ->
-            let
-                child =
-                    if Set.member var state.setVars then
-                        ifSet
+        Script.InlineConditional { markup, appears } ->
+            if List.all (testPredicate state) appears then
+                loadMarkup state markup
 
-                    else
-                        ifUnset
-            in
-            case child of
-                Nothing ->
-                    []
-
-                Just markup ->
-                    loadMarkup state markup
+            else
+                []
 
 
-update : Msg -> Model -> ( Model, Cmd msg )
+
+{- }
+   let
+       child =
+           if Set.member var state.setVars then
+               ifSet
+
+           else
+               ifUnset
+   in
+   case child of
+       Nothing ->
+           []
+
+       Just markup ->
+           loadMarkup state markup
+-}
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case ( msg, model.state ) of
         ( Select option, Play state ) ->
@@ -336,27 +301,26 @@ update msg model =
                         |> List.filter (\scene -> option.key == scene.key)
                         |> List.head
 
+
                 nextPrevious =
                     if option.vanishing then
                         state.previous ++ [ ( Tuple.first state.current, Nothing ) ]
 
                     else
-                        state.previous ++ [ ( Tuple.first state.current, Just option ) ]
+                        state.previous ++ [ ( Tuple.first state.current, Just { option | appears = [] } ) ]
             in
             case nextScene of
                 Just scene ->
                     let
-                        callstack =
-                            if option.break then
-                                []
-
-                            else
-                                state.callstack
-
                         nextState =
-                            loadScene scene.contents { state | callstack = callstack, previous = nextPrevious } []
+                            loadScene scene.contents { state | previous = nextPrevious } []
                     in
-                    { model | state = Play nextState } |> pure
+                    { model | state = Play nextState }
+                        |> with
+                            (Browser.Dom.getViewportOf "storyviewport"
+                                |> Task.andThen (\viewport -> Browser.Dom.setViewportOf "storyviewport" 0 viewport.scene.height)
+                                |> Task.attempt (\_ -> NoOp)
+                            )
 
                 Nothing ->
                     -- Error, can't (?) happen
@@ -377,7 +341,7 @@ update msg model =
                 scene :: _ ->
                     let
                         state =
-                            { previous = [], current = ( [], [] ), callstack = [], setVars = Set.empty }
+                            { previous = [], current = ( [], [] ), setVars = Set.empty }
                     in
                     { model | state = Play <| loadScene scene.contents state [] } |> pure
 
@@ -465,12 +429,13 @@ view model =
                             View.view model.code model.camperdown
                         ]
 
-                Play { previous, current } ->
-                    Element.column
-                        [ width (px 700), height fill, padding 30, spacing 20, Background.color columncolor, centerX ]
-                        ((List.map viewPrevious previous |> List.concat)
-                            ++ viewCurrentScene current
-                        )
+                Play ({ previous, current } as state) ->
+                    el [ width fill, height fill, scrollbarX, htmlAttribute <| Attributes.id "storyviewport" ] <|
+                        Element.column
+                            [ width (px 700), height fill, padding 30, spacing 20, Background.color columncolor, centerX ]
+                            ((List.map viewPrevious previous |> List.concat)
+                                ++ viewCurrentScene state current
+                            )
             ]
 
 
@@ -501,20 +466,25 @@ viewPrevious ( contents, selected ) =
            )
 
 
-viewCurrentScene : ( List (List Script.Text), List Script.Choice ) -> List (Element Msg)
-viewCurrentScene ( story, options ) =
+viewCurrentScene : ScriptState -> ( List (List Script.Text), List Script.Choice ) -> List (Element Msg)
+viewCurrentScene state ( story, options ) =
     List.map viewParagraph story
-        ++ List.map
-            (\option ->
-                paragraph
-                    (Border.color activeButtonColor
-                        :: Font.color activeButtonColor
-                        :: Events.onClick (Select option)
-                        :: commonButton
+        ++ (options
+                |> List.filter
+                    (\option ->
+                        List.all (testPredicate state) option.appears
                     )
-                    (List.map viewText option.text)
-            )
-            options
+                |> List.map
+                    (\option ->
+                        paragraph
+                            (Border.color activeButtonColor
+                                :: Font.color activeButtonColor
+                                :: Events.onClick (Select option)
+                                :: commonButton
+                            )
+                            (List.map viewText option.text)
+                    )
+           )
 
 
 viewParagraph : List Script.Text -> Element Msg
@@ -559,7 +529,7 @@ viewText section =
             el [] (el [ Background.color (rgb255 255 180 190), padding 10 ] (text str))
 
         Script.InlineConditional f ->
-            el [] (el [ Background.color (rgb255 255 180 190), padding 10 ] (text <| "Error: unresolved inline conditional" ++ Debug.toString f))
+            el [] (el [ Background.color (rgb255 255 180 190), padding 10 ] (text <| "Error: unresolved inline conditional"))
 
 
 bgcolor : Color

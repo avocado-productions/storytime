@@ -1,51 +1,139 @@
 module Convert exposing (..)
 
 import Camperdown as Camp
+import List.Extra as List
 import Loc exposing (Loc)
-import Traversal
 import ScriptTypes as Script
 import Set exposing (Set)
+import Traversal
 import Tuple
 
 
 type alias Divert =
-    Camp.Divert (Camp.Mark String) Char ( String, String, Maybe String ) String
+    Camp.Divert (Camp.Mark String) Char ( String, Maybe String, Maybe String ) String
 
 
 type alias NestedDocument =
-    Camp.Document Divert (Camp.Mark String) Char ( String, String, Maybe String ) String
+    Camp.Document Divert (Camp.Mark String) Char ( String, Maybe String, Maybe String ) String
 
 
 type alias NestedSection =
-    Camp.Section Divert (Camp.Mark String) Char ( String, String, Maybe String ) String
+    Camp.Section Divert (Camp.Mark String) Char ( String, Maybe String, Maybe String ) String
 
 
 type alias NestedElement =
-    Camp.Element Divert (Camp.Mark String) Char ( String, String, Maybe String ) String
+    Camp.Element Divert (Camp.Mark String) Char ( String, Maybe String, Maybe String ) String
 
 
 type alias FlatDocument =
-    Camp.Document Camp.Label (Camp.Mark String) Char ( String, String, Maybe String ) String
+    Camp.Document Camp.Label (Camp.Mark String) Char ( String, Maybe String, Maybe String ) String
 
 
 type alias FlatSection =
-    Camp.Section Camp.Label (Camp.Mark String) Char ( String, String, Maybe String ) String
+    Camp.Section Camp.Label (Camp.Mark String) Char ( String, Maybe String, Maybe String ) String
 
 
 type alias FlatElement =
-    Camp.Element Camp.Label (Camp.Mark String) Char ( String, String, Maybe String ) String
+    Camp.Element Camp.Label (Camp.Mark String) Char ( String, Maybe String, Maybe String ) String
 
 
 type alias Parameter =
-    Camp.Parameter Char ( String, String, Maybe String ) String
+    Camp.Parameter Char ( String, Maybe String, Maybe String ) String
 
 
 type alias Text =
-    Camp.Text Char ( String, String, Maybe String ) String
+    Camp.Text Char ( String, Maybe String, Maybe String ) String
 
 
 type alias Value =
-    Camp.Value Char ( String, String, Maybe String ) String
+    Camp.Value Char ( String, Maybe String, Maybe String ) String
+
+
+rearrangeLastElement accum elem =
+    case elem of
+        Camp.Command { lines, command, child } ->
+            case ( Tuple.first command, child ) of
+                ( Camp.Bang "choice", Just (Camp.Nested elems) ) ->
+                    [ Camp.Command { lines = lines, command = command, child = Just (Camp.Nested (rearrangeChoice accum elems)) } ]
+
+                ( Camp.Bang "choice", Just (Camp.Immediate elems) ) ->
+                    [ Camp.Command { lines = lines, command = command, child = Just (Camp.Immediate (rearrangeChoice accum elems)) } ]
+
+                ( Camp.Bang "cond", Just (Camp.Nested elems) ) ->
+                    [ Camp.Command { lines = lines, command = command, child = Just (Camp.Nested (rearrangeChoice accum elems)) } ]
+
+                ( Camp.Bang "cond", Just (Camp.Immediate elems) ) ->
+                    [ Camp.Command { lines = lines, command = command, child = Just (Camp.Immediate (rearrangeChoice accum elems)) } ]
+
+                ( Camp.Bang "continue", _ ) ->
+                    [ Camp.Command { lines = lines, command = command, child = rearrangeChild accum child } ]
+
+                ( Camp.Bang "pause", _ ) ->
+                    [ Camp.Command { lines = lines, command = command, child = rearrangeChild accum child } ]
+
+                _ ->
+                    elem :: accum
+
+        _ ->
+            elem :: accum
+
+
+rearrangeChild accum child =
+    case child of
+        Nothing ->
+            Just (Camp.Nested accum)
+
+        Just (Camp.Nested elems) ->
+            Just (Camp.Nested (rearrangePassage accum elems))
+
+        Just (Camp.Immediate elems) ->
+            Just (Camp.Immediate (rearrangePassage accum elems))
+
+        _ ->
+            child
+
+
+rearrangePassage accum elems =
+    case List.unconsLast elems of
+        Nothing ->
+            accum
+
+        Just ( last, rest ) ->
+            rest ++ rearrangeLastElement accum last
+
+
+rearrangeChoice accum elems =
+    let
+        spanner elem =
+            case elem of
+                Camp.Command { command } ->
+                    case Tuple.first command of
+                        Camp.Huh _ ->
+                            True
+
+                        _ ->
+                            False
+
+                _ ->
+                    False
+
+        ( options, content ) =
+            List.span spanner elems
+
+        newAccum =
+            rearrangePassage accum content
+    in
+    List.map
+        (\option ->
+            case option of
+                Camp.Command { lines, command, child } ->
+                    Camp.Command { lines = lines, command = command, child = rearrangeChild newAccum child }
+
+                _ ->
+                    -- impossible
+                    option
+        )
+        options
 
 
 nextifySection : Maybe Camp.Label -> NestedSection -> List FlatSection
@@ -67,8 +155,8 @@ nextify next elems =
 
 type IntermediateDivert
     = Pointy Camp.Label
-    | Nested (List (Camp.Element IntermediateDivert (Camp.Mark String) Char ( String, String, Maybe String ) String))
-    | Immediate (List (Camp.Element IntermediateDivert (Camp.Mark String) Char ( String, String, Maybe String ) String))
+    | Nested (List (Camp.Element IntermediateDivert (Camp.Mark String) Char ( String, Maybe String, Maybe String ) String))
+    | Immediate (List (Camp.Element IntermediateDivert (Camp.Mark String) Char ( String, Maybe String, Maybe String ) String))
 
 
 nextifyElement next =
@@ -135,8 +223,18 @@ flattenElement =
 
 
 convert : NestedDocument -> Script.Script
-convert { prelude, sections } =
+convert document =
     let
+        prelude =
+            rearrangePassage [] document.prelude
+
+        sections =
+            List.map
+                (\{ level, label, contents } ->
+                    { level = level, label = label, contents = rearrangePassage [] contents }
+                )
+                document.sections
+
         ( firstNext, restRawScenes ) =
             List.foldr
                 (\section ( next, accum ) ->
@@ -156,7 +254,7 @@ convert { prelude, sections } =
     in
     case scriptDFS (firstRawScene ++ restRawScenes) (Set.fromList [ firstKey ]) [ firstKey ] [] of
         Err msg ->
-            [ { key = "", set = [], contents = Script.Paragraph [ Script.Problem msg ] Script.Return } ]
+            [ { key = "", set = [], contents = Script.Paragraph [ Script.Problem msg ] Script.Fin } ]
 
         Ok script ->
             script
@@ -176,7 +274,7 @@ scriptDFS script known frontier accum =
                 Ok rawScene ->
                     let
                         contents =
-                            convertElements True script rawScene.contents
+                            convertElements script rawScene.contents
 
                         neighbors =
                             getNeighbors contents
@@ -203,15 +301,11 @@ getNeighbors template =
         Script.Paragraph _ rest ->
             getNeighbors rest
 
-        Script.Conditional choices continuation ->
-            List.concat (List.map (Tuple.second >> getNeighbors) choices) ++ Maybe.withDefault [] (Maybe.map getNeighbors continuation)
+        Script.Conditional choices ->
+            List.concat (List.map (Tuple.second >> getNeighbors) choices)
 
-        Script.Choices { options, continuation } ->
-            let
-                conoption =
-                    Maybe.map List.singleton continuation |> Maybe.withDefault []
-            in
-            List.map .key (conoption ++ options)
+        Script.Choices options ->
+            List.map .key options
 
         Script.Set _ rest ->
             getNeighbors rest
@@ -222,8 +316,127 @@ getNeighbors template =
         Script.Toggle _ rest ->
             getNeighbors rest
 
-        Script.Return ->
+        Script.Fin ->
             []
+
+
+convertPredicateParameters : List (Loc Parameter) -> Script.Predicate -> Result String Script.Predicate
+convertPredicateParameters parameters accum =
+    case parameters of
+        [] ->
+            Ok <| List.reverse accum
+
+        ( _, ( "isSet", [ ( _, Camp.Variable var ) ] ) ) :: rest ->
+            convertPredicateParameters rest (( True, var ) :: accum)
+
+        ( _, ( "isUnset", [ ( _, Camp.Variable var ) ] ) ) :: rest ->
+            convertPredicateParameters rest (( False, var ) :: accum)
+
+        ( _, ( key, _ ) ) :: _ ->
+            Err <| "Unknown or ill-formed parameter " ++ key
+
+
+convertElements : List FlatSection -> List FlatElement -> Script.Template
+convertElements script elems =
+    case elems of
+        [] ->
+            Script.Fin
+
+        (Camp.Paragraph markup) :: rest ->
+            Script.Paragraph (convertMarkup plain markup) (convertElements script rest)
+
+        (Camp.Command { command, child }) :: rest ->
+            case ( command, child ) of
+                ( ( Camp.Bang "set", ( [ ( _, Camp.Variable var ) ], [] ) ), Nothing ) ->
+                    Script.Set var (convertElements script rest)
+
+                ( ( Camp.Bang "unset", ( [ ( _, Camp.Variable var ) ], [] ) ), Nothing ) ->
+                    Script.Unset var (convertElements script rest)
+
+                ( ( Camp.Bang "toggle", ( [ ( _, Camp.Variable var ) ], [] ) ), Nothing ) ->
+                    Script.Toggle var (convertElements script rest)
+
+                ( ( Camp.Bang "cond", ( [], [] ) ), Just label ) ->
+                    case convertConds script label of
+                        Ok conditionals ->
+                            flagIfNotLast "cond" rest <| Script.Conditional conditionals
+
+                        Err msg ->
+                            flagIfNotLast "cond" rest <| Script.Paragraph [ Script.Problem msg ] Script.Fin
+
+                ( ( Camp.Bang "pause", ( args, parameters ) ), Just label ) ->
+                    case convertChoice args parameters label of
+                        Ok choice ->
+                            flagIfNotLast "pause" rest <| Script.Choices [ choice ]
+
+                        Err str ->
+                            flagIfNotLast "pause" rest <| Script.Paragraph [ Script.Problem str ] Script.Fin
+
+                ( ( Camp.Bang "continue", ( [], [] ) ), Just label ) ->
+                    case lookup label script of
+                        Ok more ->
+                            flagIfNotLast "continue" rest <| convertElements script more.contents
+
+                        Err str ->
+                            flagIfNotLast "continue" rest <| Script.Paragraph [ Script.Problem str ] Script.Fin
+
+                ( ( Camp.Bang "choice", ( [], [] ) ), Just label ) ->
+                    case convertChoices script label of
+                        Ok choices ->
+                            flagIfNotLast "choice" rest <| Script.Choices choices
+
+                        Err str ->
+                            flagIfNotLast "choice" rest <| Script.Paragraph [ Script.Problem str ] Script.Fin
+
+                ( ( Camp.Bang name, _ ), _ ) ->
+                    Script.Paragraph [ Script.Problem <| "Unexpected or ill-formed command !" ++ name ] Script.Fin
+
+                ( ( Camp.Huh name, _ ), _ ) ->
+                    Script.Paragraph [ Script.Problem <| "This is not a place where we expect subcommands like ?" ++ name ] Script.Fin
+
+        (Camp.Problem { problem }) :: rest ->
+            Script.Paragraph [ Script.Problem problem ] (convertElements script rest)
+
+        _ ->
+            Script.Paragraph [ Script.Problem "Unexpected element in this passage" ] Script.Fin
+
+
+flagIfNotLast name rest =
+    if List.length rest == 0 then
+        identity
+
+    else
+        Script.Paragraph [ Script.Problem <| "A !" ++ name ++ "can't be followed by other text or commands in a passage." ]
+
+
+convertChoices : List FlatSection -> Camp.Label -> Result String (List Script.Choice)
+convertChoices script label =
+    lookup label script
+        |> Result.andThen (\{ contents } -> convertChoicesImpl script contents [])
+
+
+convertChoicesImpl script options accum =
+    case options of
+        [] ->
+            Ok <| List.reverse accum
+
+        (Camp.Command { command, child }) :: rest ->
+            case ( command, child ) of
+                ( ( Camp.Huh "(none)", ( args, parameters ) ), Just label ) ->
+                    convertChoice args parameters label
+                        |> Result.andThen
+                            (\choice ->
+                                convertChoicesImpl script rest (choice :: accum)
+                            )
+
+                _ ->
+                    Err "Unexpected element inside a `!choices` command."
+
+        (Camp.Problem { problem }) :: _ ->
+            Err problem
+
+        _ ->
+            Err "Unexpected element inside a `!choices` command."
 
 
 convertChoice : List (Loc Value) -> List (Loc Parameter) -> Camp.Label -> Result String Script.Choice
@@ -245,149 +458,33 @@ convertChoice args parameters label =
                         Result.andThen
                             (\choice ->
                                 case parameter of
-                                    ( "break", [] ) ->
-                                        Ok { choice | break = True }
-
                                     ( "vanishing", [ ( _, Camp.Variable "true" ) ] ) ->
                                         Ok { choice | vanishing = True }
 
                                     ( "vanishing", [ ( _, Camp.Variable "false" ) ] ) ->
                                         Ok { choice | vanishing = False }
 
+                                    ( "isSet", [ ( _, Camp.Variable var ) ] ) ->
+                                        Ok { choice | appears = ( True, var ) :: choice.appears }
+
+                                    ( "isUnset", [ ( _, Camp.Variable var ) ] ) ->
+                                        Ok { choice | appears = ( False, var ) :: choice.appears }
+
                                     ( param, _ ) ->
                                         Err <| "Unexpected or ill-formed parameter " ++ param
                             )
                     )
-                    (Ok { key = convertLabel label, text = text, vanishing = vanishing, break = False })
+                    (Ok { key = convertLabel label, text = text, vanishing = vanishing, appears = [] })
                     (List.map Loc.value parameters)
             )
 
 
-convertPredicateParameters : List (Loc Parameter) -> Script.Predicate -> Result String Script.Predicate
-convertPredicateParameters parameters accum =
-    case parameters of
-        [] ->
-            Ok <| List.reverse accum
-
-        ( _, ( "isSet", [ ( _, Camp.Variable var ) ] ) ) :: rest ->
-            convertPredicateParameters rest (( True, var ) :: accum)
-
-        ( _, ( "isUnset", [ ( _, Camp.Variable var ) ] ) ) :: rest ->
-            convertPredicateParameters rest (( False, var ) :: accum)
-
-        ( _, ( key, _ ) ) :: _ ->
-            Err <| "Unknown or ill-formed parameter " ++ key
-
-
-convertElements : Bool -> List FlatSection -> List FlatElement -> Script.Template
-convertElements choicesAreAllowed script elems =
-    case elems of
-        [] ->
-            Script.Return
-
-        (Camp.Paragraph markup) :: rest ->
-            Script.Paragraph (convertMarkup plain markup) (convertElements choicesAreAllowed script rest)
-
-        (Camp.Command { command, child }) :: rest ->
-            case ( command, child ) of
-                ( ( Camp.Bang "set", ( [ ( _, Camp.Variable var ) ], [] ) ), Nothing ) ->
-                    Script.Set var (convertElements choicesAreAllowed script rest)
-
-                ( ( Camp.Bang "unset", ( [ ( _, Camp.Variable var ) ], [] ) ), Nothing ) ->
-                    Script.Unset var (convertElements choicesAreAllowed script rest)
-
-                ( ( Camp.Bang "toggle", ( [ ( _, Camp.Variable var ) ], [] ) ), Nothing ) ->
-                    Script.Toggle var (convertElements choicesAreAllowed script rest)
-
-                ( ( Camp.Bang "if", ( [], parameters ) ), Just label ) ->
-                    case Result.map2 Tuple.pair (lookup label script) (convertPredicateParameters parameters []) of
-                        Err msg ->
-                            Script.Paragraph [ Script.Problem msg ] (convertElements choicesAreAllowed script rest)
-
-                        Ok ( subscript, params ) ->
-                            if List.length rest == 0 then
-                                Script.Conditional [ ( params, convertElements choicesAreAllowed script subscript.contents ) ]
-                                    Nothing
-
-                            else
-                                Script.Conditional [ ( params, convertElements False script subscript.contents ) ]
-                                    (Just <| convertElements choicesAreAllowed script rest)
-
-                ( ( Camp.Bang "cond", ( [], [] ) ), Just label ) ->
-                    case convertConds (List.length rest == 0) script label of
-                        Err msg ->
-                            Script.Paragraph [ Script.Problem msg ] (convertElements choicesAreAllowed script rest)
-
-                        Ok conditionals ->
-                            if List.length rest == 0 then
-                                Script.Conditional conditionals Nothing
-
-                            else
-                                Script.Conditional conditionals (Just <| convertElements choicesAreAllowed script rest)
-
-                ( ( Camp.Bang "continue", ( args, parameters ) ), Just label ) ->
-                    let
-                        anyProblem =
-                            if not choicesAreAllowed then
-                                \_ -> Script.Paragraph [ Script.Problem "!continue command in a non-terminal passage ignored" ] Script.Return
-
-                            else if List.length rest == 0 then
-                                identity
-
-                            else
-                                Script.Paragraph [ Script.Problem "A !continue can't be followed by other text or commands in a passage." ]
-                    in
-                    case convertChoice args parameters label of
-                        Ok choice ->
-                            anyProblem <| Script.Choices { options = [ choice ], continuation = Nothing }
-
-                        Err str ->
-                            anyProblem <| Script.Paragraph [ Script.Problem str ] Script.Return
-
-                ( ( Camp.Bang "choices", ( [], [] ) ), Just label ) ->
-                    let
-                        anyProblem =
-                            if not choicesAreAllowed then
-                                \_ -> Script.Paragraph [ Script.Problem "!choice command in a non-terminal passage ignored" ] Script.Return
-
-                            else if List.length rest == 0 then
-                                identity
-
-                            else
-                                Script.Paragraph [ Script.Problem "A !choice can't be followed by other text or commands in a passage." ]
-                    in
-                    case convertChoices script label of
-                        Ok choices ->
-                            anyProblem <| Script.Choices choices
-
-                        Err str ->
-                            anyProblem <| Script.Paragraph [ Script.Problem str ] Script.Return
-
-                ( ( Camp.Bang name, _ ), _ ) ->
-                    Script.Paragraph [ Script.Problem <| "Unexpected or ill-formed command !" ++ name ] Script.Return
-
-                ( ( Camp.Huh name, _ ), _ ) ->
-                    Script.Paragraph [ Script.Problem <| "This is not a place where we expect subcommands like ?" ++ name ] Script.Return
-
-        (Camp.Problem { problem }) :: rest ->
-            Script.Paragraph [ Script.Problem problem ] (convertElements choicesAreAllowed script rest)
-
-        _ ->
-            Script.Paragraph [ Script.Problem "Unexpected element in this passage" ] Script.Return
-
-
-convertConds choicesAreAllowed script label =
+convertConds script label =
     lookup label script
-        |> Result.andThen (\{ contents } -> convertCondsImpl choicesAreAllowed script contents [])
+        |> Result.andThen (\{ contents } -> convertCondsImpl script contents [])
 
 
-convertChoices : List FlatSection -> Camp.Label -> Result String { options : List Script.Choice, continuation : Maybe Script.Choice }
-convertChoices script label =
-    lookup label script
-        |> Result.andThen (\{ contents } -> convertChoicesImpl script contents { options = [], continuation = Nothing })
-
-
-convertCondsImpl choicesAreAllowed script conditionals accum =
+convertCondsImpl script conditionals accum =
     case conditionals of
         [] ->
             Ok <| List.reverse accum
@@ -398,8 +495,8 @@ convertCondsImpl choicesAreAllowed script conditionals accum =
                     Result.map2 Tuple.pair (lookup label script) (convertPredicateParameters parameters [])
                         |> Result.andThen
                             (\( { contents }, params ) ->
-                                convertCondsImpl choicesAreAllowed script rest <|
-                                    ( params, convertElements choicesAreAllowed script contents )
+                                convertCondsImpl script rest <|
+                                    ( params, convertElements script contents )
                                         :: accum
                             )
 
@@ -411,11 +508,11 @@ convertCondsImpl choicesAreAllowed script conditionals accum =
                         lookup label script
                             |> Result.andThen
                                 (\{ contents } ->
-                                    Ok <| List.reverse (( [], convertElements choicesAreAllowed script contents ) :: accum)
+                                    Ok <| List.reverse (( [], convertElements script contents ) :: accum)
                                 )
 
                 ( ( Camp.Huh cmd, _ ), _ ) ->
-                    Err <| "Unknown or ill-formed subcommand ?" ++ cmd ++ Debug.toString conditionals
+                    Err <| "Unknown or ill-formed subcommand ?" ++ cmd
 
                 ( ( Camp.Bang cmd, _ ), _ ) ->
                     Err <| "Unexpected position for a command !" ++ cmd
@@ -427,65 +524,23 @@ convertCondsImpl choicesAreAllowed script conditionals accum =
             Err "A !cond command can only contain subcommands."
 
 
-
--- convertChoicesImpl : List Camp.FlatPassage -> List Camp.FlatElement -> { options : List Script.Choice, continuation : Maybe Script.Choice } -> Result String { options : List Script.Choice, continuation : Maybe Script.Choice }
-
-
-convertChoicesImpl script options accum =
-    case options of
-        [] ->
-            Ok { accum | options = List.reverse accum.options }
-
-        (Camp.Command {command, child }) :: rest ->
-            case ( command, child ) of
-                ( ( Camp.Huh "(none)", ( args, parameters ) ), Just label ) ->
-                    convertChoice args parameters label
-                        |> Result.andThen
-                            (\choice ->
-                                convertChoicesImpl script rest <|
-                                    { accum | options = choice :: accum.options }
-                            )
-
-                ( ( Camp.Huh "continue", ( args, parameters ) ), Just label ) ->
-                    convertChoice args parameters label
-                        |> Result.andThen
-                            (\choice ->
-                                case accum.continuation of
-                                    Nothing ->
-                                        convertChoicesImpl script rest <|
-                                            { accum | continuation = Just choice }
-
-                                    _ ->
-                                        Err "Multiple continues inside of a `!choices` command."
-                            )
-
-                _ ->
-                    Err "Unexpeced subcommand inside a `!choices` command."
-
-        (Camp.Problem { problem }) :: _ ->
-            Err problem
-
-        _ ->
-            Err "Unexpected element inside a `!choices` command."
-
-
 plain : Script.Style
 plain =
     { bold = False, italic = False, under = False, strike = False }
 
 
-
--- lookup : Camp.Label -> List Camp.FlatPassage -> Result String Camp.FlatPassage
-
-
 lookup label sections =
     let
         eq x y =
-            case (x, y) of
-               (Camp.Named (_, a), Camp.Named (_, b)) -> a == b
-               (Camp.Anonymous a, Camp.Anonymous b) -> a == b
-               _ -> False 
+            case ( x, y ) of
+                ( Camp.Named ( _, a ), Camp.Named ( _, b ) ) ->
+                    a == b
 
+                ( Camp.Anonymous a, Camp.Anonymous b ) ->
+                    a == b
+
+                _ ->
+                    False
     in
     case sections of
         [] ->
@@ -546,10 +601,23 @@ convertText style text =
                         :: convertMarkup style (Loc.value markup)
                         ++ [ Script.Styled style "”" ]
 
-                ( ( "[", "]", Just var ), ( [], params ) ) ->
-                    case convertInlineConditional style params { var = var, ifSet = Nothing, ifUnset = Nothing } of
+                ( ( "...", _, _ ), _ ) ->
+                    [ Script.Styled style "…" ]
+
+                ( ( "--", _, _ ), _ ) ->
+                    [ Script.Styled style "–" ]
+
+                ( ( "---", _, _ ), _ ) ->
+                    [ Script.Styled style "—" ]
+
+                ( ( "[", _, Just "if" ), ( [], params ) ) ->
+                    case convertPredicateParameters params [] of
                         Ok cond ->
-                            [ Script.InlineConditional cond ]
+                            [ Script.InlineConditional
+                                { markup = convertMarkup style (Loc.value markup)
+                                , appears = cond
+                                }
+                            ]
 
                         Err msg ->
                             [ Script.Problem msg ]
@@ -559,21 +627,6 @@ convertText style text =
 
         _ ->
             [ Script.Problem "Unexpected annotation" ]
-
-
-convertInlineConditional style params accum =
-    case params of
-        [] ->
-            Ok accum
-
-        ( _, ( "isSet", [ ( _, Camp.Markup markup ) ] ) ) :: rest ->
-            convertInlineConditional style rest { accum | ifSet = Just <| convertMarkup style markup }
-
-        ( _, ( "isUnset", [ ( _, Camp.Markup markup ) ] ) ) :: rest ->
-            convertInlineConditional style rest { accum | ifUnset = Just <| convertMarkup style markup }
-
-        ( _, ( param, _ ) ) :: _ ->
-            Err ("Unknown parameter " ++ param)
 
 
 convertMarkup : Script.Style -> List Text -> List Script.Text
